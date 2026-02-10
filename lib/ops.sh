@@ -1,0 +1,429 @@
+#!/bin/bash
+
+# --- Phase 4: Operational Commands ---
+
+list_clusters() {
+    log "Scanning project ${PROJECT_ID} for Talos clusters..."
+
+    # 1. Get Unique Cluster Names
+    # Filter by instances having the talos-version label (indicates new structure)
+    # OR we can fallback to just cluster label for broader discovery.
+    # Using 'labels.cluster:*' covers both.
+    local CLUSTER_NAMES
+    CLUSTER_NAMES=$(gcloud compute instances list \
+        --filter="labels.cluster:*" \
+        --format="value(labels.cluster)" \
+        --project="${PROJECT_ID}" | sort | uniq)
+    
+    if [ -z "$CLUSTER_NAMES" ]; then
+        echo "No Talos clusters found in project ${PROJECT_ID}."
+        return
+    fi
+    
+    # 2. Print Header
+    printf "%-30s %-15s %-15s %-15s %-15s %-20s %-20s\n" "CLUSTER NAME" "ZONE" "TALOS VERSION" "K8S VERSION" "CILIUM VERSION" "PUBLIC IP" "BASTION IP"
+
+    
+    for cluster in $CLUSTER_NAMES; do
+        # Get Version Info (Take first instance's version)
+        local VER_INFO
+        VER_INFO=$(gcloud compute instances list --filter="labels.cluster=${cluster} AND labels.talos-version:*" --limit=1 --format="value(zone.basename(), labels.talos-version, labels.k8s-version, labels.cilium-version)" --project="${PROJECT_ID}")
+        
+        # Read into variables (tab separated by default gcloud value format? distinct args?)
+        # value(a,b) output is tab-separated.
+        local CLUSTER_ZONE
+        local TALOS_VER
+        local K8S_VER
+        local CILIUM_VER
+        read -r CLUSTER_ZONE TALOS_VER K8S_VER CILIUM_VER <<< "$VER_INFO"
+        
+        # Restore versions (hyphen to dot)
+        TALOS_VER="${TALOS_VER//-/.}"
+        K8S_VER="${K8S_VER//-/.}"
+        CILIUM_VER="${CILIUM_VER//-/.}"
+        
+        if [ -z "$TALOS_VER" ]; then TALOS_VER="unknown"; fi
+        if [ -z "$K8S_VER" ]; then K8S_VER="unknown"; fi
+        if [ -z "$CILIUM_VER" ]; then CILIUM_VER="unknown"; fi
+        
+        if [ -z "$CILIUM_VER" ]; then CILIUM_VER="unknown"; fi
+        
+        # Determine Region
+        local CLUSTER_REGION="${CLUSTER_ZONE%-*}"
+
+        # Get Public IP
+        # 1. Try to fetch the Reserved Static IP (Preferred for CCM/Traefik)
+        local IP=""
+        local IP_NAME="${cluster}-ingress-v4-0"
+        
+        if gcloud compute addresses describe "${IP_NAME}" --region "${CLUSTER_REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+             IP=$(gcloud compute addresses describe "${IP_NAME}" --region "${CLUSTER_REGION}" --format="value(address)" --project="${PROJECT_ID}")
+        fi
+        
+        # 2. Fallback: Check for Manual Forwarding Rules (Legacy / HostPort)
+        if [ -z "$IP" ]; then
+             IP=$(gcloud compute forwarding-rules list --filter="name~'^${cluster}-ingress.*'" --limit=1 --format="value(IPAddress)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+        fi
+
+        if [ -z "$IP" ]; then IP="Pending/None"; fi
+
+        # Get Bastion IP (Internal preferred for IAP)
+        local BASTION_IPS
+        BASTION_IPS=$(gcloud compute instances list --filter="name=${cluster}-bastion" --limit=1 --format="value(networkInterfaces[0].networkIP,networkInterfaces[0].accessConfigs[0].natIP)" --project="${PROJECT_ID}" 2>/dev/null)
+        local BASTION_INT BASTION_EXT
+        read -r BASTION_INT BASTION_EXT <<< "$BASTION_IPS"
+        
+        local BASTION_DISPLAY="${BASTION_INT:-$BASTION_EXT}"
+        if [ -z "$BASTION_DISPLAY" ]; then BASTION_DISPLAY="None"; fi
+        
+        printf "%-30s %-15s %-15s %-15s %-15s %-20s %-20s\n" "$cluster" "$CLUSTER_ZONE" "$TALOS_VER" "$K8S_VER" "$CILIUM_VER" "$IP" "$BASTION_DISPLAY"
+    done
+    echo ""
+}
+
+get_credentials() {
+    log "Fetching credentials for cluster: ${CLUSTER_NAME}..."
+    
+    # 1. Bucket Check
+    if ! gsutil -q stat "${GCS_SECRETS_URI}"; then
+        error "Secrets not found at ${GCS_SECRETS_URI}. Is the cluster deployed?"
+        exit 1
+    fi
+    
+    # 2. Download Secrets
+    mkdir -p "${OUTPUT_DIR}"
+    log "Downloading secrets to ${OUTPUT_DIR}..."
+    run_safe gsutil cp "${GCS_SECRETS_URI}" "${OUTPUT_DIR}/secrets.yaml"
+    chmod 600 "${OUTPUT_DIR}/secrets.yaml"
+    
+    # 3. Get CP IP
+    local CP_ILB_IP
+    CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null)
+    
+    if [ -z "$CP_ILB_IP" ]; then
+        error "Control Plane Internal IP not found. Is the Load Balancer deployed?"
+        exit 1
+    fi
+    
+    # 4. Generate Configs
+    log "Regenerating Talos/Kube config (Endpoint: https://${CP_ILB_IP}:6443)..."
+    
+    # We can rely on 'talosctl' being available because check_dependencies runs first
+    # and installs it if missing.
+    run_safe talosctl gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${OUTPUT_DIR}/secrets.yaml" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
+
+    # Also extract kubeconfig
+    log "Generating kubeconfig..."
+    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" config endpoint "https://${CP_ILB_IP}:6443"
+    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" --nodes "${CP_ILB_IP}" kubeconfig "${OUTPUT_DIR}/kubeconfig"
+
+    
+    echo ""
+    log "Credentials saved to: ${OUTPUT_DIR}"
+    echo "------------------------------------------------"
+    echo "NOTE: Control Plane is INTERNAL (${CP_ILB_IP})."
+    echo "To access, use the Bastion host:"
+    echo "  gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap --project ${PROJECT_ID}"
+    echo ""
+    echo "Then use talosctl/kubectl from the Bastion, or set up a tunnel."
+    echo "------------------------------------------------"
+}
+
+update_cilium() {
+    set_names
+    log "Updating Cilium to version ${CILIUM_VERSION}..."
+    
+    # 1. Redeploy Helm Chart
+    deploy_cilium
+    
+    # 2. Update Instance Labels
+    local CILIUM_LABEL="${CILIUM_VERSION//./-}"
+    log "Updating instance labels to cilium-version=${CILIUM_LABEL}..."
+    
+    # Find all cluster instances
+    local INSTANCES
+    INSTANCES=$(gcloud compute instances list --filter="labels.cluster=${CLUSTER_NAME} AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
+    
+    if [ -n "$INSTANCES" ]; then
+        for instance in $INSTANCES; do
+                log "Updating label for ${instance}..."
+                run_safe gcloud compute instances add-labels "${instance}" --labels="cilium-version=${CILIUM_LABEL}" --zone "${ZONE}" --project="${PROJECT_ID}"
+        done
+        log "Labels updated."
+    else
+        warn "No instances found to update labels."
+    fi
+    
+    status
+}
+
+list_instances() {
+    set_names
+    log "Listing instances for cluster '${CLUSTER_NAME}' (Project: ${PROJECT_ID})..."
+    
+    # Check if any instances exist
+    if ! gcloud compute instances list --filter="labels.cluster=${CLUSTER_NAME}" --project="${PROJECT_ID}" --limit=1 &> /dev/null; then
+        warn "No instances found for cluster '${CLUSTER_NAME}'."
+        return
+    fi
+    
+    # List Instances with custom columns
+    # NAME, ZONE, INTERNAL_IP, EXTERNAL_IP, STATUS
+    gcloud compute instances list \
+        --filter="labels.cluster=${CLUSTER_NAME}" \
+        --project="${PROJECT_ID}" \
+        --sort-by=name \
+        --format="table(name, zone.basename(), networkInterfaces[0].networkIP:label=INTERNAL_IP, networkInterfaces[0].accessConfigs[0].natIP:label=EXTERNAL_IP, status)"
+        
+    echo ""
+}
+
+list_ports() {
+    set_names
+    
+    # Check for required tools
+    for cmd in jq column; do
+        if ! command -v "$cmd" &> /dev/null; then
+                error "Command '$cmd' is required for list-ports but not installed."
+                return 1
+        fi
+    done
+
+    log "Listing Public Forwarding Rules (Ports) for cluster '${CLUSTER_NAME}' (Project: ${PROJECT_ID})..."
+    
+    # Check if any rules exist first to avoid empty table headers
+    if ! gcloud compute forwarding-rules list --filter="name:${CLUSTER_NAME}*" --project="${PROJECT_ID}" --limit=1 &> /dev/null; then
+            warn "No forwarding rules found matching '${CLUSTER_NAME}*'."
+            return
+    fi
+        
+    # Fetch JSON and process with jq to flatten ports
+    # We normalize 'ports' (list) and 'portRange' (string) into a single stream of rows
+    gcloud compute forwarding-rules list \
+        --filter="name:${CLUSTER_NAME}*" \
+        --project="${PROJECT_ID}" \
+        --format="json" | \
+    jq -r '
+        ["NAME", "REGION", "IP_ADDRESS", "PROTOCOL", "PORT", "TARGET"],
+        (.[] | 
+            # Determine Region basename or Global
+            (.region | if . then (split("/") | last) else "global" end) as $region |
+            # Determine Target basename
+            (.target | if . then (split("/") | last) else "-" end) as $target |
+            # Handle ports (list) vs portRange (string)
+            # If ports exists and not empty, iterate. Else use portRange or "-" as single item.
+            ((.ports | if . == null or length == 0 then null else . end) // [.portRange // "-"])[] as $port |
+            [.name, $region, .IPAddress, .IPProtocol, $port, $target]
+        ) | @tsv' | \
+    column -t
+        
+    echo ""
+}
+
+update_ports() {
+    set_names
+    log "Updating Ingress Ports for cluster '${CLUSTER_NAME}'..."
+    log "Configuration: INGRESS_IPV4_CONFIG='${INGRESS_IPV4_CONFIG}'"
+    apply_ingress
+    log "Port update complete."
+}
+
+ssh_command() {
+    set_names
+    
+    # Check if bastion exists
+    if ! gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
+        error "Bastion '${BASTION_NAME}' not found in zone '${ZONE}'."
+        return 1
+    fi
+    
+    if [ $# -eq 0 ]; then
+        log "Opening interactive shell to Bastion '${BASTION_NAME}'..."
+    else
+        log "Executing command on Bastion '${BASTION_NAME}': $*"
+    fi
+    
+    # SSH into Bastion
+    # Using StrictHostKeyChecking=no to avoid issues if bastion is recreated with same name/IP
+    # "$@" passes remaining arguments to the ssh command
+    # Using 'exec' to replace the current process (cleaner exit signals/codes)
+    exec gcloud compute ssh "${BASTION_NAME}" \
+        --zone "${ZONE}" \
+        --project="${PROJECT_ID}" \
+        --tunnel-through-iap \
+        -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
+}
+
+
+status() {
+    set_names
+    echo ""
+    log "Cluster Status: ${CLUSTER_NAME}"
+    echo "--------------------------------------------------"
+    log "Control Plane (Internal LB):"
+    gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" --format="value(address)" 2>/dev/null || echo "  (Not found)"
+    
+    echo ""
+    log "Ingress IPs (Worker Load Balancers):"
+    gcloud compute addresses list --filter="name~'${CLUSTER_NAME}-ingress.*'" --format="table[box](name, address, region)" --project="${PROJECT_ID}"
+    
+    echo ""
+    log "Bastion Access:"
+    echo "  gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap"
+    
+    echo ""
+    log "Talos API Access (via Bastion):"
+    echo "  1. SSH into Bastion:"
+    echo "     gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap"
+    echo "  2. Run talosctl:"
+    echo "     talosctl --talosconfig talosconfig dashboard"
+    echo "--------------------------------------------------"
+}
+
+
+diagnose() {
+    set_names
+    check_dependencies
+    
+    echo "========================================="
+    echo " Talos GCP Diagnostics"
+    echo " Cluster: ${CLUSTER_NAME}"
+    echo " Project: ${PROJECT_ID}"
+    echo " Zone:    ${ZONE}"
+    echo "========================================="
+    
+    # 1. Check Cloud NAT (Crucial for Bastion Outbound)
+    echo ""
+    echo "[Network] Checking Cloud NAT..."
+    if gcloud compute routers nats list --router="${ROUTER_NAME}" --region="${REGION}" --project="${PROJECT_ID}" | grep -q "${NAT_NAME}"; then
+        echo "OK: Cloud NAT '${NAT_NAME}' exists."
+    else
+        echo "ERROR: Cloud NAT '${NAT_NAME}' not found. Bastion may lack internet access."
+    fi
+
+    # 2. Check Bastion Status
+    echo ""
+    echo "[Compute] Checking Bastion Host..."
+    local BASTION_STATUS=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --format="value(status)" 2>/dev/null)
+    if [ "$BASTION_STATUS" == "RUNNING" ]; then
+        echo "OK: Bastion '${BASTION_NAME}' is RUNNING."
+    else
+        echo "ERROR: Bastion '${BASTION_NAME}' is in state: ${BASTION_STATUS:-Not Found}"
+    fi
+
+    # 3. Check Control Plane Instances
+    echo ""
+    echo "[Compute] Checking Control Plane Instances..."
+    gcloud compute instances list --filter="name~'${CLUSTER_NAME}-cp-.*'" --project="${PROJECT_ID}" --format="table(name,status,networkInterfaces[0].networkIP)"
+
+    # 4. Check Load Balancers (Forwarding Rules)
+    echo ""
+    echo "[Network] Checking Load Balancers..."
+    gcloud compute forwarding-rules list --filter="name~'${CLUSTER_NAME}.*'" --project="${PROJECT_ID}" --format="table(name,IPAddress,IPProtocol,ports,target)"
+
+    # 5. Check Health Checks
+    echo ""
+    echo "[Network] Checking Health Checks..."
+    gcloud compute health-checks list --filter="name~'${CLUSTER_NAME}.*'" --project="${PROJECT_ID}" --format="table(name,type,checkIntervalSec,timeoutSec,healthyThreshold,unhealthyThreshold)"
+
+    echo "========================================="
+    echo "Diagnostics Complete."
+}
+
+
+public_ip() {
+    set_names
+    check_dependencies
+    log "Retrieving Public IP for cluster ${CLUSTER_NAME}..."
+    local IP=$(gcloud compute forwarding-rules list --filter="name~'${CLUSTER_NAME}-ingress.*'" --limit=1 --format="value(IPAddress)" --project="${PROJECT_ID}")
+    
+    if [ -n "$IP" ]; then
+        echo "$IP"
+    else
+        error "No Public IP found (Ingress not deployed?)"
+        exit 1
+    fi
+}
+
+verify_storage() {
+    log "Verifying Storage Configuration..."
+    
+    # 1. Check StorageClasses
+    log "Checking StorageClasses..."
+    if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get sc"; then
+        error "Failed to list StorageClasses. Is the cluster reachable?"
+        return 1
+    fi
+    
+    # 2. Create PVC & Pod
+    log "Creating PVC and Test Pod..."
+    cat <<EOF > "${OUTPUT_DIR}/storage-test.yaml"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: test-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-storage-pod
+spec:
+  containers:
+  - name: test-container
+    image: busybox
+    command: ["/bin/sh", "-c", "echo 'Hello Talos Storage' > /data/test-file && sleep 3600"]
+    volumeMounts:
+    - mountPath: "/data"
+      name: test-volume
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: test-pvc
+  restartPolicy: Never
+EOF
+
+    run_safe gcloud compute scp "${OUTPUT_DIR}/storage-test.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig apply -f storage-test.yaml"
+
+    # 3. Wait for Pod
+    log "Waiting for Test Pod to be Ready (max 2m)..."
+    local POD_STATUS=""
+    for i in {1..24}; do
+        POD_STATUS=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get pod test-storage-pod -o jsonpath='{.status.phase}'" 2>/dev/null)
+        if [ "$POD_STATUS" == "Running" ]; then
+            log "Pod is Running!"
+            break
+        fi
+        echo -n "."
+        sleep 5
+    done
+    echo ""
+    
+    if [ "$POD_STATUS" != "Running" ]; then
+        error "Pod failed to start. Status: $POD_STATUS"
+        log "Investigating..."
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig describe pod test-storage-pod"
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig describe pvc test-pvc"
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get events --sort-by=.metadata.creationTimestamp | tail -n 20"
+    else
+        # 4. Check Write
+        log "Verifying data write..."
+        if gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig exec test-storage-pod -- cat /data/test-file" | grep -q "Hello Talos Storage"; then
+            log "SUCCESS: Data written and read from PVC."
+        else
+            error "FAILURE: Could not read data from PVC."
+        fi
+    fi
+
+    # 5. Cleanup
+    log "Cleaning up Test Resources..."
+    gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig delete -f storage-test.yaml --grace-period=0 --force"
+    rm -f "${OUTPUT_DIR}/storage-test.yaml"
+}

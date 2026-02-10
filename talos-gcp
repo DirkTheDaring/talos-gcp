@@ -1,0 +1,197 @@
+#!/bin/bash
+
+# Talos GCP Deployment Script
+# Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
+
+set -x
+echo "DEBUG: Script Started"
+set -euo pipefail
+
+# Configuration
+SCRIPT_DIR="$(dirname "$0")"
+source "${SCRIPT_DIR}/lib/utils.sh"
+
+CONFIG_FILE=""
+ARGS=()
+
+# Parse early arguments for config file
+for arg in "$@"; do
+    case $arg in
+        -c|--config)
+            if [ -n "${2:-}" ]; then
+                CONFIG_FILE="$2"
+                shift 2
+            else
+                echo "Error: --config requires a file argument."
+                exit 1
+            fi
+            ;;
+        -h|--help)
+            # Source help library if available for global help, or defer to usage
+            # We defer to check dependencies or direct source
+            source "$(dirname "$0")/lib/help.sh"
+            show_help
+            ;;
+        *)
+            ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Restore positional parameters (removing -c/--config)
+set -- "${ARGS[@]}"
+
+# Load Config if specified
+if [ -n "$CONFIG_FILE" ]; then
+    if [ -f "$CONFIG_FILE" ]; then
+        echo "Loading config from $CONFIG_FILE..."
+        source "$CONFIG_FILE"
+    else
+        echo "Error: Config file $CONFIG_FILE not found."
+        exit 1
+    fi
+else
+    # Try default cluster.env if it exists
+    if [ -f "cluster.env" ]; then
+        echo "Loading default config from cluster.env..."
+        source "cluster.env"
+    fi
+fi
+
+# Configuration
+export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+
+# Detect Project ID
+# Use configured value if set, otherwise auto-detect
+if [ -z "${PROJECT_ID:-}" ]; then
+    PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
+fi
+
+if [ -z "${PROJECT_ID:-}" ]; then
+    error "No GCP Project ID found."
+    error "Please run: gcloud config set project YOUR_PROJECT_ID"
+    error "Or set PROJECT_ID in config/env."
+    exit 1
+fi
+
+REGION=${REGION:-"us-central1"}
+ZONE=${ZONE:-"${REGION}-b"}
+
+# Import Libraries (Order matters for overrides/defaults)
+source "${SCRIPT_DIR}/lib/config.sh"
+source "${SCRIPT_DIR}/lib/network.sh"
+source "${SCRIPT_DIR}/lib/bastion.sh"
+source "${SCRIPT_DIR}/lib/controlplane.sh"
+source "${SCRIPT_DIR}/lib/workers.sh"
+source "${SCRIPT_DIR}/lib/cni.sh"
+
+# New Libraries
+source "${SCRIPT_DIR}/lib/images.sh"
+source "${SCRIPT_DIR}/lib/bootstrap.sh"
+source "${SCRIPT_DIR}/lib/lifecycle.sh"
+source "${SCRIPT_DIR}/lib/ops.sh"
+source "${SCRIPT_DIR}/lib/traefik.sh"
+source "${SCRIPT_DIR}/lib/help.sh"
+
+# Call immediately to set defaults for global scope
+# set_names  <-- Removed global call to prevent side effects. Explicitly called in local functions.
+
+# --- Main Interaction ---
+
+if [ $# -lt 1 ]; then
+    usage
+    exit 1
+fi
+
+COMMAND="$1"
+
+case "$COMMAND" in
+    create)
+        deploy_all
+        ;;
+    destroy)
+        cleanup
+        ;;
+    status)
+        set_names
+        check_dependencies
+        status
+        ;;
+    diagnose)
+        set_names
+        check_dependencies
+        diagnose
+        ;;
+    list-clusters|list)
+        set_names
+        check_dependencies
+        list_clusters
+        ;;
+    ssh|ssh-bastion)
+        shift
+        set_names
+        check_dependencies
+        ssh_command "$@"
+        ;;
+    get-credentials)
+        set_names
+        check_dependencies
+        get_credentials
+        ;;
+    update-cilium)
+        set_names
+        check_dependencies
+        update_cilium
+        ;;
+    list-instances)
+        set_names
+        check_dependencies
+        list_instances
+        ;;
+    list-ports)
+        set_names
+        check_dependencies
+        list_ports
+        ;;
+    update-ports)
+        set_names
+        check_dependencies
+        update_ports
+        ;;
+    public-ip)
+        set_names
+        check_dependencies
+        public_ip
+        ;;
+    scale-up|scale) # Alias 'scale' to 'scale-up' for now, or could handle generic scale
+        scale_up
+        ;;
+    scale-down)
+        scale_down
+        ;;
+    verify-storage)
+        set_names
+        check_dependencies
+        verify_storage
+        ;;
+    update-traefik)
+        set_names
+        check_dependencies
+        update_traefik
+        ;;
+    start)
+        start_nodes
+        ;;
+    stop)
+        stop_nodes
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        error "Unknown command: $COMMAND"
+        usage
+        exit 1
+        ;;
+esac

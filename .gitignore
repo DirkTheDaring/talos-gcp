@@ -1,0 +1,30 @@
+# Artifacts & Output
+_out/
+logs/
+archive/
+
+# Configuration & Secrets
+cluster.env
+talosconfig
+kubeconfig
+secrets.yaml
+*.yaml
+!manifests/*.yaml
+
+# Logs
+*.log
+
+# Scripts & Misc
+*.sh.*
+*.bak
+*.tmp
+*.swp
+
+# OS & IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Legacy Files (if they appear)
+patch_config.py
+bootstrap_cluster.sh

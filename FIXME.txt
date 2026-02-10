@@ -1,0 +1,12 @@
+- how to scale the number of ips now that the port mechanisms does not work
+
+- we need also to delete persistent volume which are not deleted by default
+   - where do we find them?
+   - how to clean up?
+
+- also make it possible to update the talos if we have a running cluster
+- also this weird required for numpy should be address
+- ipv6 for the frontend?
+- name pattern of the instances?  
+- i want no access to bastion host for normal users - how to do that
+- additional i want an outside internet port ip/ipv6
