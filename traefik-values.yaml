@@ -1,0 +1,10 @@
+logs:
+  access:
+    enabled: true
+    fields:
+      headers:
+        defaultmode: keep
+        names:
+          User-Agent: keep
+          Authorization: drop
+          Content-Type: keep
