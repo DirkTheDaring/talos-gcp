@@ -39,10 +39,10 @@ chmod +x kubectl
 mv kubectl /usr/local/bin/
 
 # Install Helm
-retry curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+retry curl -L https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
 # Install Cilium CLI
-CILIUM_CLI_VERSION=\$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/master/stable.txt)
+CILIUM_CLI_VERSION=\$(curl -sL https://raw.githubusercontent.com/cilium/cilium-cli/master/stable.txt)
 retry curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/\${CILIUM_CLI_VERSION}/cilium-linux-amd64.tar.gz
 tar xzf cilium-linux-amd64.tar.gz -C /usr/local/bin
 rm cilium-linux-amd64.tar.gz

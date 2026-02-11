@@ -16,7 +16,7 @@ deploy_cilium() {
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
         if ! command -v helm &>/dev/null; then
             echo 'Helm not found. Installing...'
-            curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            curl -sL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
         else
             echo 'Helm is already installed.'
         fi

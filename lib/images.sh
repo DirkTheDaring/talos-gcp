@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # Check if URL exists
+# Check if URL exists (Follow Redirects)
 check_url() {
-    curl --connect-timeout 10 --http1.1 --output /dev/null --silent --head --fail "$1"
+    curl --connect-timeout 10 --location --output /dev/null --silent --head --fail "$1"
 }
 
 sanitize_version() {
