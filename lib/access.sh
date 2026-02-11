@@ -90,7 +90,7 @@ cmd_grant_admin() {
     # Fetch actual SA from Bastion (it uses Default Compute SA usually)
     log "  -> resolving Bastion Service Account..."
     local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
+    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
     
     if [ -n "${ACTUAL_SA}" ]; then
         log "  -> Granting 'roles/iam.serviceAccountUser' on '${ACTUAL_SA}'..."
@@ -135,7 +135,7 @@ cmd_grant_access() {
     # 4. Service Account User (Required for OS Login on VM with SA)
     log "  -> resolving Bastion Service Account..."
     local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
+    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
 
     if [ -n "${ACTUAL_SA}" ]; then
         log "  -> Granting 'roles/iam.serviceAccountUser' on '${ACTUAL_SA}'..."
@@ -185,7 +185,7 @@ cmd_list_access() {
     echo ""
     # Resolve SA for listing
     local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
+    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
     if [ -n "${ACTUAL_SA}" ]; then
         echo "=== [SA User] roles/iam.serviceAccountUser (${ACTUAL_SA}) ==="
         gcloud iam service-accounts get-iam-policy "${ACTUAL_SA}" \
@@ -251,7 +251,7 @@ cmd_revoke_access() {
     # 4. Service Account User
     log "  -> resolving Bastion Service Account..."
     local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
+    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
 
     if [ -n "${ACTUAL_SA}" ]; then
         log "  -> Removing 'roles/iam.serviceAccountUser' from '${ACTUAL_SA}'..."
