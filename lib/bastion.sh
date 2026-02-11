@@ -214,11 +214,11 @@ phase4_bastion() {
     log "Pushing cluster configurations to Bastion..."
     
     # 0. Create config directories first
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "mkdir -p ~/.kube ~/.talos"
+    run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "mkdir -p ~/.kube ~/.talos"
 
     # 1. talosconfig
     if [ -f "${OUTPUT_DIR}/talosconfig" ]; then
-        run_safe gcloud compute scp "${OUTPUT_DIR}/talosconfig" "${BASTION_NAME}:~/.talos/config" --zone "${ZONE}" --tunnel-through-iap
+        run_safe retry gcloud compute scp "${OUTPUT_DIR}/talosconfig" "${BASTION_NAME}:~/.talos/config" --zone "${ZONE}" --tunnel-through-iap
         # Merge if needed, but for now just overwrite main config
         # run_safe gcloud compute ssh "${BASTION_NAME}" ... "talosctl config merge ..."
     else
@@ -227,7 +227,7 @@ phase4_bastion() {
 
     # 2. kubeconfig
     if [ -f "${OUTPUT_DIR}/kubeconfig" ]; then
-        run_safe gcloud compute scp "${OUTPUT_DIR}/kubeconfig" "${BASTION_NAME}:~/.kube/config" --zone "${ZONE}" --tunnel-through-iap
+        run_safe retry gcloud compute scp "${OUTPUT_DIR}/kubeconfig" "${BASTION_NAME}:~/.kube/config" --zone "${ZONE}" --tunnel-through-iap
     else
         warn "Local kubeconfig not found. Bastion cannot manage K8s."
     fi
@@ -235,7 +235,7 @@ phase4_bastion() {
     # 3. Configure /etc/skel for future Admins (Multi-Admin Support)
     log "Configuring /etc/skel for future Admins..."
     # SECURITY: Use 600 permissions to prevent non-root users from reading templates
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
+    run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
         sudo mkdir -p /etc/skel/.kube /etc/skel/.talos
         [ -f ~/.kube/config ] && sudo cp ~/.kube/config /etc/skel/.kube/config
         [ -f ~/.talos/config ] && sudo cp ~/.talos/config /etc/skel/.talos/config

@@ -70,11 +70,23 @@ cmd_grant_admin() {
     local EMAIL="$1"
     log "Granting Admin Access to '${EMAIL}'..."
     
-    # 1. OS Admin Login (Root)
+    # 1a. OS Admin Login (Root SSH)
     log "  -> Adding 'roles/compute.osAdminLogin' (Root Access)..."
     run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member="user:${EMAIL}" \
         --role="roles/compute.osAdminLogin" >/dev/null
+
+    # 1b. Infrastructure Admin (Create/Delete Instances) - Needed for recreate-bastion
+    log "  -> Adding 'roles/compute.instanceAdmin.v1' (Manage Instances)..."
+    run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+        --member="user:${EMAIL}" \
+        --role="roles/compute.instanceAdmin.v1" >/dev/null
+
+    # 1c. Network User (Use Shared VPC/Subnets)
+    log "  -> Adding 'roles/compute.networkUser' (Use Network)..."
+    run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+        --member="user:${EMAIL}" \
+        --role="roles/compute.networkUser" >/dev/null
 
     # 2. IAP Tunnel Access (Often implicitly held by project owners, but explicit is safer)
     log "  -> Adding 'roles/iap.tunnelResourceAccessor' (Tunnel Access)..."
