@@ -3,7 +3,7 @@
 # Talos GCP Deployment Script
 # Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
 
-set -x
+#set -x
 echo "DEBUG: Script Started"
 set -euo pipefail
 
@@ -25,6 +25,10 @@ while [[ $# -gt 0 ]]; do
                 echo "Error: --config requires a file argument."
                 exit 1
             fi
+            ;;
+        --config=*)
+            CONFIG_FILE="${1#*=}"
+            shift
             ;;
         -h|--help)
             # Source help library if available for global help, or defer to usage
@@ -93,6 +97,7 @@ source "${SCRIPT_DIR}/lib/lifecycle.sh"
 source "${SCRIPT_DIR}/lib/ops.sh"
 source "${SCRIPT_DIR}/lib/traefik.sh"
 source "${SCRIPT_DIR}/lib/orphans.sh"
+source "${SCRIPT_DIR}/lib/access.sh"
 source "${SCRIPT_DIR}/lib/help.sh"
 
 # Call immediately to set defaults for global scope
@@ -243,6 +248,11 @@ case "$COMMAND" in
         else
              list_orphans
         fi
+        ;;
+    access-info)
+        set_names
+        # check_dependencies - Not needed
+        access_info
         ;;
     start)
         # check_dependencies - Not needed
