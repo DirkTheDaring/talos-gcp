@@ -177,6 +177,8 @@ EOF
             --image-project="${BASTION_IMAGE_PROJECT}" \
             --metadata-from-file=startup-script="${OUTPUT_DIR}/bastion_startup.sh" \
             --metadata=enable-oslogin=TRUE \
+            --service-account="${SA_EMAIL}" \
+            --scopes=cloud-platform \
             --labels="cluster=${CLUSTER_NAME},talos-version=${TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
             --project="${PROJECT_ID}"
             

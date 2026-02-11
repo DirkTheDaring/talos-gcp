@@ -87,19 +87,10 @@ cmd_grant_admin() {
     run_safe gsutil iam ch "user:${EMAIL}:objectViewer" "gs://${BUCKET_NAME}"
 
     # 4. Service Account User (Required for OS Login on VM with SA)
-    # Fetch actual SA from Bastion (it uses Default Compute SA usually)
-    log "  -> resolving Bastion Service Account..."
-    local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
-    
-    if [ -n "${ACTUAL_SA}" ]; then
-        log "  -> Granting 'roles/iam.serviceAccountUser' on '${ACTUAL_SA}'..."
-        run_safe gcloud iam service-accounts add-iam-policy-binding "${ACTUAL_SA}" \
-            --member="user:${EMAIL}" \
-            --role="roles/iam.serviceAccountUser" >/dev/null
-    else
-        warn "Could not determine Bastion Service Account. Skipping 'serviceAccountUser' role."
-    fi
+    log "  -> Granting 'roles/iam.serviceAccountUser' on '${SA_EMAIL}'..."
+    run_safe gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+        --member="user:${EMAIL}" \
+        --role="roles/iam.serviceAccountUser" >/dev/null
 
     log "Admin access granted."
 }
@@ -133,20 +124,11 @@ cmd_grant_access() {
     run_safe gsutil iam ch "user:${EMAIL}:objectViewer" "gs://${BUCKET_NAME}"
     
     # 4. Service Account User (Required for OS Login on VM with SA)
-    log "  -> resolving Bastion Service Account..."
-    local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
-
-    if [ -n "${ACTUAL_SA}" ]; then
-        log "  -> Granting 'roles/iam.serviceAccountUser' on '${ACTUAL_SA}'..."
-        run_safe gcloud iam service-accounts add-iam-policy-binding "${ACTUAL_SA}" \
-            --member="user:${EMAIL}" \
-            --role="roles/iam.serviceAccountUser" >/dev/null
+    log "  -> Granting 'roles/iam.serviceAccountUser' on '${SA_EMAIL}'..."
+    run_safe gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+        --member="user:${EMAIL}" \
+        --role="roles/iam.serviceAccountUser" >/dev/null
          log "Developer access granted (SSH + IAP + GCS + SA User)."
-    else
-         warn "Could not determine Bastion Service Account. Skipping 'serviceAccountUser' role."
-         log "Developer access granted (SSH + IAP + GCS)."
-    fi
     
     log "Ask the user to run:"
     log "  1. ./talos-gcp get-credentials"
@@ -183,18 +165,12 @@ cmd_list_access() {
     gsutil iam get "gs://${BUCKET_NAME}" | grep "user:" || echo "No explicit user bindings found on bucket."
     
     echo ""
-    # Resolve SA for listing
-    local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
-    if [ -n "${ACTUAL_SA}" ]; then
-        echo "=== [SA User] roles/iam.serviceAccountUser (${ACTUAL_SA}) ==="
-        gcloud iam service-accounts get-iam-policy "${ACTUAL_SA}" \
-            --flatten="bindings[].members" \
-            --filter="bindings.role:roles/iam.serviceAccountUser" \
-            --format="value(bindings.members)" || true
-    else
-        echo "=== [SA User] (Bastion SA not found) ==="
-    fi
+    echo ""
+    echo "=== [SA User] roles/iam.serviceAccountUser (${SA_EMAIL}) ==="
+    gcloud iam service-accounts get-iam-policy "${SA_EMAIL}" \
+        --flatten="bindings[].members" \
+        --filter="bindings.role:roles/iam.serviceAccountUser" \
+        --format="value(bindings.members)" || true
 }
 
 cmd_revoke_access() {
@@ -249,18 +225,10 @@ cmd_revoke_access() {
     fi
     
     # 4. Service Account User
-    log "  -> resolving Bastion Service Account..."
-    local ACTUAL_SA
-    ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null || true)
-
-    if [ -n "${ACTUAL_SA}" ]; then
-        log "  -> Removing 'roles/iam.serviceAccountUser' from '${ACTUAL_SA}'..."
-        run_safe gcloud iam service-accounts remove-iam-policy-binding "${ACTUAL_SA}" \
-            --member="user:${EMAIL}" \
-            --role="roles/iam.serviceAccountUser" >/dev/null || warn "Role not found or already removed."
-    else
-        warn "Could not determine Bastion Service Account. Skipping 'serviceAccountUser' cleanup."
-    fi
+    log "  -> Removing 'roles/iam.serviceAccountUser' from '${SA_EMAIL}'..."
+    run_safe gcloud iam service-accounts remove-iam-policy-binding "${SA_EMAIL}" \
+        --member="user:${EMAIL}" \
+        --role="roles/iam.serviceAccountUser" >/dev/null || warn "Role not found or already removed."
     
     log "Access revoked."
 }
