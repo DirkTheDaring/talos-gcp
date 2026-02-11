@@ -16,7 +16,10 @@ ${YELLOW}Commands:${NC}
   ${GREEN}public-ip${NC}          Show the Public IP of the Control Plane Load Balancer.
   ${GREEN}recreate-bastion${NC}  Destroy and recreate the Bastion host (e.g. to apply config changes).
   ${GREEN}grant-admin${NC}       Grant 'roles/compute.osAdminLogin' to a user (GCP IAM).
+  ${GREEN}grant-access${NC}      Grant 'roles/compute.osLogin' + IAP Access (Developer).
+  ${GREEN}revoke-access${NC}     Revoke Developer Access (SSH, IAP, GCS).
   ${GREEN}list-admins${NC}       List all users with 'roles/compute.osAdminLogin' (Bastion Admins).
+  ${GREEN}list-access${NC}       List all users with Access Roles (Admin, Developer, Tunnel, GCS).
   ${GREEN}diagnose${NC}           Run a suite of health checks (APIs, Ports, Routes).
   ${GREEN}status${NC}             Show current cluster status (Node versions, Talos API check).
   ${GREEN}list-clusters${NC}      List all Talos clusters in the project with version info.
