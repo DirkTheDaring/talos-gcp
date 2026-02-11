@@ -2,80 +2,29 @@
 
 # --- Phase 4: Lifecycle Management ---
 
-scale_up() {
+apply() {
     set_names
-    check_quotas
-    check_permissions
-    local CURRENT_WORKERS
-    # Filter by label 'cluster=${CLUSTER_NAME}' and name pattern
-    CURRENT_WORKERS=$(gcloud compute instances list --filter="labels.cluster=${CLUSTER_NAME} AND name~'${CLUSTER_NAME}-worker.*'" --format="value(name)" --project="${PROJECT_ID}")
+    check_dependencies || return 1
     
-    local MAX_INDEX=-1
-    for worker in $CURRENT_WORKERS; do
-        local suffix="${worker##*-}"
-        if [[ "$suffix" =~ ^[0-9]+$ ]]; then
-            if [ "$suffix" -gt "$MAX_INDEX" ]; then
-                MAX_INDEX=$suffix
-            fi
-        fi
-    done
+    log "Applying configuration changes..."
+    log "Target Worker Count: ${WORKER_COUNT}"
     
-    local NEXT_INDEX=$((MAX_INDEX + 1))
-    local WORKER="${CLUSTER_NAME}-worker-${NEXT_INDEX}"
+    # Reconcile Workers (Create missing, Prune extra)
+    phase2_workers || return 1
     
-    log "Scaling up: Creating ${WORKER}..."
-    if [ ! -f "${OUTPUT_DIR}/worker.yaml" ]; then error "${OUTPUT_DIR}/worker.yaml not found!"; exit 1; fi
-    
-    create_worker_instance "${WORKER}"
-        
-    log "Scaling operations complete."
-        
-    log "Scaling operations complete."
+    log "Apply complete. Run 'talos-gcp status' to verify."
     status
-}
-
-scale_down() {
-    set_names
-    check_dependencies
-    local CURRENT_WORKERS
-    CURRENT_WORKERS=$(gcloud compute instances list --filter="labels.cluster=${CLUSTER_NAME} AND name~'${CLUSTER_NAME}-worker.*'" --format="value(name)" --project="${PROJECT_ID}")
-    
-    local MAX_INDEX=-1
-    local TARGET_WORKER=""
-    
-    for worker in $CURRENT_WORKERS; do
-        local suffix="${worker##*-}"
-        if [[ "$suffix" =~ ^[0-9]+$ ]]; then
-            if [ "$suffix" -gt "$MAX_INDEX" ]; then
-                MAX_INDEX=$suffix
-                TARGET_WORKER="$worker"
-            fi
-        fi
-    done
-    
-    if [ -z "$TARGET_WORKER" ] || [ "$MAX_INDEX" -eq -1 ]; then
-        error "No worker nodes found!"
-        exit 1
-    fi
-    
-    if [ "$MAX_INDEX" -eq 0 ]; then
-        warn "Refusing to delete worker-0. Use cleanup to destroy the cluster."
-        exit 1
-    fi
-    
-    log "Scaling down: Deleting ${TARGET_WORKER}..."
-    run_safe gcloud compute instances delete "${TARGET_WORKER}" --zone "${ZONE}" --project="${PROJECT_ID}" -q
-    # IG automatically updates
-    log "Scale down complete."
 }
 
 stop_nodes() {
     set_names
-    check_dependencies
+    # check_dependencies - Not needed
     log "Stopping all Talos nodes to save costs..."
+    local INSTANCES
     INSTANCES=$(gcloud compute instances list --filter="name~'${CLUSTER_NAME}-.*' AND status:RUNNING AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
     
     if [ -n "$INSTANCES" ]; then
+        local INSTANCES_LIST
         INSTANCES_LIST=$(echo "$INSTANCES" | tr '\n' ' ')
         run_safe gcloud compute instances stop $INSTANCES_LIST --zone "${ZONE}" --project="${PROJECT_ID}"
         log "All nodes stopped."
@@ -86,11 +35,13 @@ stop_nodes() {
 
 start_nodes() {
     set_names
-    check_dependencies
+    # check_dependencies - Not needed
     log "Starting all Talos nodes..."
+    local INSTANCES
     INSTANCES=$(gcloud compute instances list --filter="name~'${CLUSTER_NAME}-.*' AND (status:TERMINATED OR status:STOPPED) AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
     
     if [ -n "$INSTANCES" ]; then
+        local INSTANCES_LIST
         INSTANCES_LIST=$(echo "$INSTANCES" | tr '\n' ' ')
         run_safe gcloud compute instances start $INSTANCES_LIST --zone "${ZONE}" --project="${PROJECT_ID}"
         log "Nodes started."
@@ -99,22 +50,57 @@ start_nodes() {
     fi
 }
 
+phase1_resources() {
+    log "Phase 1: Resource Gathering..."
+    check_apis
+    check_quotas
+    ensure_service_account
+    
+    # Ensure Images for both roles
+    ensure_role_images
+    
+    # Create output directory
+    mkdir -p "${OUTPUT_DIR}"
+    
+    # Ensure local talosctl matches CP version
+    local binary_version="${CP_TALOS_VERSION}"
+    local TALOSCTL_BIN="${OUTPUT_DIR}/talosctl"
+    
+    log "Ensuring local talosctl matches ${binary_version}..."
+    if [ ! -f "${TALOSCTL_BIN}" ]; then
+         local local_ver=$(talosctl version --client --short 2>/dev/null || echo "none")
+         # Simple check (contains version string)
+         if [[ "$local_ver" == *"${binary_version}"* ]]; then
+             cp "$(which talosctl)" "${TALOSCTL_BIN}"
+         else
+             if command -v talosctl &>/dev/null; then
+                 # Fallback to system one but warn
+                 cp "$(which talosctl)" "${TALOSCTL_BIN}"
+                 warn "Local talosctl ($local_ver) might not match requested ($binary_version)."
+             else
+                 warn "talosctl not found locally. Bootstrap might fail if not in PATH."
+             fi
+         fi
+         chmod +x "${TALOSCTL_BIN}" || true
+    fi
+}
+
 deploy_all() {
     set_names
-    check_dependencies
-    phase1_resources
-    phase2_infra_cp # Networking, CP
-    phase2_bastion  # Create Bastion
-    phase3_run      # Wait for CP
-    phase4_bastion  # Wait for Bastion
-    phase5_register # Bootstrap, CNI, CCM, CSI
+    check_dependencies || return 1
+    phase1_resources || return 1
+    phase2_infra_cp || return 1 # Networking, CP
+    phase2_bastion || return 1  # Create Bastion
+    phase3_run || return 1      # Wait for CP
+    phase4_bastion || return 1  # Wait for Bastion
+    phase5_register || return 1 # Bootstrap, CNI, CCM, CSI
     
     # Create Workers AFTER CNI is ready (Critical for Cilium)
-    phase2_workers
+    phase2_workers || return 1
     
     # Verify
     if [ "${INSTALL_CSI}" == "true" ]; then
-        verify_storage
+        verify_storage || return 1
     fi
     
     log "Deployment Complete!"
@@ -139,8 +125,10 @@ cleanup() {
     
     # 1. Delete Instances
     log "Deleting Instances..."
+    local INSTANCES
     INSTANCES=$(gcloud compute instances list --filter="(labels.cluster=${CLUSTER_NAME} OR name~'${CLUSTER_NAME}-.*') AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
     if [ -n "$INSTANCES" ]; then
+        local INSTANCES_LIST
         INSTANCES_LIST=$(echo "$INSTANCES" | tr '\n' ' ')
         run_safe gcloud compute instances delete -q $INSTANCES_LIST --zone "${ZONE}" --project="${PROJECT_ID}" || warn "Failed to delete some instances."
     else
@@ -197,6 +185,7 @@ cleanup() {
     log "Cleaning up IAM & Network..."
     if gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}" &> /dev/null; then
             # Remove IAM bindings logic...
+            local ROLE
             for ROLE in roles/compute.loadBalancerAdmin roles/compute.viewer roles/compute.securityAdmin roles/compute.networkViewer roles/compute.storageAdmin roles/compute.instanceAdmin.v1 roles/iam.serviceAccountUser; do
                 gcloud projects remove-iam-policy-binding "${PROJECT_ID}" --member serviceAccount:"${SA_EMAIL}" --role "${ROLE}" --quiet &> /dev/null || true
             done
@@ -211,6 +200,7 @@ cleanup() {
     
     if [ -n "$ALL_VPC_FW" ]; then
         # Convert newlines to spaces
+        local ALL_VPC_FW_LIST
         ALL_VPC_FW_LIST=$(echo "$ALL_VPC_FW" | tr '\n' ' ')
         run_safe gcloud compute firewall-rules delete -q $ALL_VPC_FW_LIST --project="${PROJECT_ID}" || warn "Failed to delete some firewall rules."
     else
@@ -225,6 +215,10 @@ cleanup() {
     fi
     gcloud compute networks delete -q "${VPC_NAME}" --project="${PROJECT_ID}" || true
     
-    rm -rf "${OUTPUT_DIR}" "patch_config.py"
+    if [ -n "${OUTPUT_DIR}" ] && [ "${OUTPUT_DIR}" != "/" ]; then
+        rm -rf "${OUTPUT_DIR}" "patch_config.py"
+    else
+        warn "Skipping dangerous cleanup of OUTPUT_DIR=${OUTPUT_DIR}"
+    fi
     log "Cleanup Complete."
 }

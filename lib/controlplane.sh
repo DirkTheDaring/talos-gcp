@@ -47,9 +47,9 @@ phase2_controlplane() {
         log "Generating new secrets..."
         rm -f "${SECRETS_FILE}"
         if command -v podman &> /dev/null; then
-             run_safe podman run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${TALOS_VERSION}" gen secrets -o secrets.yaml
+             run_safe podman run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen secrets -o secrets.yaml
         elif command -v docker &> /dev/null; then
-             run_safe docker run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${TALOS_VERSION}" gen secrets -o secrets.yaml
+             run_safe docker run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen secrets -o secrets.yaml
         else
              run_safe talosctl gen secrets -o "${SECRETS_FILE}"
         fi
@@ -61,9 +61,9 @@ phase2_controlplane() {
     rm -f "${OUTPUT_DIR}/controlplane.yaml" "${OUTPUT_DIR}/worker.yaml" "${OUTPUT_DIR}/talosconfig"
     
     if command -v podman &> /dev/null; then
-        run_safe podman run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
+        run_safe podman run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
     elif command -v docker &> /dev/null; then
-        run_safe docker run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
+        run_safe docker run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
     else
         run_safe talosctl gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${SECRETS_FILE}" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
     fi
@@ -126,6 +126,17 @@ def patch_file(filename, is_controlplane):
         data['machine']['features']['kubePrism']['enabled'] = True
         data['machine']['features']['kubePrism']['port'] = 7445
 
+        # 6. Set Install Image (For Upgrades / Factory Support)
+        if is_controlplane:
+            install_image = "${CP_INSTALLER_IMAGE}"
+        else:
+            install_image = "${WORKER_INSTALLER_IMAGE}"
+            
+        if install_image:
+            if 'machine' not in data: data['machine'] = {}
+            if 'install' not in data['machine']: data['machine']['install'] = {}
+            data['machine']['install']['image'] = install_image
+
 
     with open(filename, 'w') as f:
         yaml.safe_dump_all(docs, f)
@@ -143,12 +154,12 @@ PYEOF
         if ! gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${cp_name}$"; then
             log "Creating control plane node $i (${cp_name})..."
             run_safe retry gcloud compute instances create "${cp_name}" \
-                --image "${TALOS_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \
+                --image "${CP_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \
                 --machine-type="${CP_MACHINE_TYPE}" --boot-disk-size="${CP_DISK_SIZE}" \
                 --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" \
                 --tags "talos-controlplane,${cp_name}" --no-address \
-                --service-account="${SA_EMAIL}" --scopes cloud-platform \
-                --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
+                --service-account="${CP_SERVICE_ACCOUNT}" --scopes cloud-platform \
+                --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${CP_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
                 --metadata-from-file=user-data="${OUTPUT_DIR}/controlplane.yaml"
         fi
         ensure_instance_in_ig "${cp_name}" "${IG_CP_NAME}"

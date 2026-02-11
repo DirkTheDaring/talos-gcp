@@ -1,12 +1,15 @@
 # Artifacts & Output
 _out/
 logs/
+archive/
 
 # Configuration & Secrets
 cluster.env
 talosconfig
 kubeconfig
 secrets.yaml
+*.yaml
+!manifests/*.yaml
 
 # Logs
 *.log

@@ -28,7 +28,10 @@ You can customize the deployment by setting environment variables before running
 | `WORKER_DISK_SIZE` | Worker **Boot Disk** Size | `20GB` |
 | `CP_COUNT` | Number of Control Plane Nodes | `3` |
 | `WORKER_COUNT` | Number of Worker Nodes | `1` |
+| `WORKER_ADDITIONAL_DISKS` | Additional Disks (type:size:device) | *(Empty)* |
 | `TALOS_VERSION` | Talos Version (e.g., v1.8.0) | *(Latest Valid)* |
+| `CP_TALOS_VERSION` | Control Plane Talos Version | `$TALOS_VERSION` |
+| `WORKER_EXTENSIONS` | Worker Extensions (e.g. gvisor) | *(Empty)* |
 
 ## Architecture
 
@@ -104,8 +107,8 @@ export CLUSTER_NAME="dev-cluster"
 
 **Scale Workers:**
 ```bash
-export CLUSTER_NAME="dev-cluster"
-./talos-gcp scale 5
+export WORKER_COUNT=5
+./talos-gcp apply
 ```
 
 **Diagnose:**
@@ -119,21 +122,67 @@ Once deployed, the script generates `talosconfig` and `kubeconfig` in `_out/${CL
 Secure access is available via IAP Tunneling (see [docs/secure-access.md](docs/secure-access.md)).
 
 ## Scaling
-You can explicitly set the number of workers, or add/remove them incrementally:
+You can explicitly set the number of workers in your config (e.g., `WORKER_COUNT=5`) and run `apply`:
+
 ```bash
-# Scale to a specific number of workers (e.g., 5)
-./talos-gcp scale 5
+# Update config or env var
+export WORKER_COUNT=5
 
-# Add a new worker node (+1)
-./talos-gcp scale-up
+# Apply changes (Prompts for confirmation if deleting nodes)
+./talos-gcp apply
 
-# Remove the worker node with the highest index
-./talos-gcp scale-down
+# Non-interactive mode (Auto-confirm)
+./talos-gcp apply --yes
 ```
 
-## Secure Access (No SSH Shell)
-For enhanced security, you can access the cluster without SSH keys or a login shell on the bastion. This uses **IAP TCP Forwarding**, which authenticates via Google Cloud IAM.
+The `apply` command is **idempotent**: it creates missing nodes and removes extra nodes to match `WORKER_COUNT`.
 
+## Secure Access (Identity-Aware Bastion)
+
+The cluster uses a hardened **Identity-Aware Bastion** for secure access.
+
+*   **Authentication**: Uses Google Identity (OS Login) + MFA. No static SSH keys.
+*   **Authorization**: Admin vs User roles.
+    *   **Admins**: Full shell access. Requires `roles/compute.osAdminLogin` (Auto-granted to deployer).
+    *   **Users**: Restricted to Port Forwarding only (No Shell). Requires `roles/iap.tunnelResourceAccessor` + `roles/compute.osLogin`.
+
+### User Management (Pure IAM)
+Access is managed entirely via Google Cloud IAM. No manual user creation is needed on the Bastion.
+
+1.  **Restricted Access (Port Forwarding Only)**:
+    Grant the user `roles/compute.osLogin`.
+    *   They can tunnel to the API/Internal LB.
+    *   They **cannot** get a shell on the Bastion (`nologin`).
+
+2.  **Admin Access (Full Shell)**:
+    Grant the user `roles/compute.osAdminLogin`.
+    *   They get a full shell (`/bin/bash`) and `sudo` rights.
+    *   *Note*: When switching roles, you may need to recreate the bastion to force a permission sync if it doesn't happen automatically.
+
+To revoke access (remove from group):
+```bash
+./talos-gcp bastion-remove-user <google-email-username>
+```
+
+### Bastion Maintenance
+To recreate the bastion (e.g., to apply new security configs or fix issues):
+```bash
+./talos-gcp recreate-bastion
+```
+
+### Admin Management
+To grant a user full shell access (Admin):
+```bash
+./talos-gcp grant-admin <email@example.com>
+```
+
+To list current Admins:
+```bash
+./talos-gcp list-admins
+```
+
+### Connecting
+Users connect via a single `gcloud` command that tunnels through IAP:
 👉 **[Read the Secure Access Guide](docs/secure-access.md)**
 
 ## Documentation

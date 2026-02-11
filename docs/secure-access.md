@@ -1,53 +1,102 @@
-# Secure Cluster Access (No SSH Shell)
+# Secure Access Guide (Identity-Aware Bastion)
 
-This guide explains how to access your Talos cluster securely without exposing public IPs or relying on legacy SSH bastion shells.
+This cluster uses a hardened, Identity-Aware security model (Pure IAM). There are no static SSH keys to share. Access is granted based on your Google Identity (Email) and IAM roles.
 
-## Why this approach?
+## Roles & Permissions
 
-Traditional bastion hosts often require:
-1.  **Public IPs**: Increasing the attack surface.
-2.  **SSH Key Management**: Rotating keys for multiple users is difficult.
-3.  **Port 22 Exposure**: Constant scanning by bots.
+Access is controlled entirely by Google Cloud IAM. No manual user creation on the bastion is required.
 
-Our approach uses Google Cloud's **Identity-Aware Proxy (IAP) TCP Forwarding**.
+### 1. Cluster Admin
+**Full Shell Access** to the Bastion + Kubernetes.
+*   **IAM Role**: `roles/compute.osAdminLogin`
+*   **Capabilities**: Full `sudo` access, interactive shell, port forwarding.
+*   **Access Logic**: The bastion checks if you can run `sudo`. If yes, you get a shell.
 
-### Benefits
-*   **Zero Public IPs**: Nodes have only private RFC1918 addresses.
-*   **IAM Authentication**: Access is granted via Google Cloud IAM roles (`roles/iap.tunnelResourceAccessor`), not SSH keys.
-*   **Auditability**: Every connection is logged in Cloud Audit Logs.
-*   **No Shell Access**: Users get direct TCP access to the Kubernetes/Talos API, but no shell on the underlying OS, enforcing the principle of least privilege.
+### 2. Cluster User
+**Restricted Access**. Can **ONLY** use **Port Forwarding** (tunneling) to reach the Kubernetes API.
+*   **IAM Role**: `roles/compute.osLogin` **AND** `roles/iap.tunnelResourceAccessor`
+*   **Capabilities**: Port forwarding (tunneling) only. **Interactive shell is BLOCKED.**
+*   **Access Logic**: The bastion checks if you can run `sudo`. If no, your shell is restricted.
 
 ---
 
-## How to Connect
+## Connection Guide
 
-You can forward local ports directly to the private Control Plane nodes via IAP.
+To access the Kubernetes API, you must open a secure tunnel via the bastion.
 
-### 1. Talos Admin Access (talosctl)
-The Talos API listens on port `50000`. To manage nodes:
+### Prerequisites
+1.  **Google Cloud CLI (`gcloud`)** installed and authenticated (`gcloud auth login`).
+2.  **IAM permissions** granted to your Google Account (ask an Admin).
 
-```bash
-# 1. Start a background tunnel to the first control plane node
-gcloud compute start-iap-tunnel talos-controlplane-0 50000 \
-    --local-host-port=localhost:50000 \
-    --zone=us-central1-b &
+### Step 1: Open the Tunnel
 
-# 2. Run talosctl against localhost
-talosctl -n localhost:50000 dashboard
-```
-
-### 2. Kubernetes API Access (kubectl)
-If you disabled the Public LoadBalancer (or want a private channel), you can tunnel to port `6443`:
+Run the following command. **Note the `-N` flag**—it is crucial for non-admin users.
 
 ```bash
-# 1. Start a background tunnel
-gcloud compute start-iap-tunnel talos-controlplane-0 6443 \
-    --local-host-port=localhost:6443 \
-    --zone=us-central1-b &
+# Replace 'dietmar_kling_gmail_com' with your actual OS Login username
+# (Run 'gcloud compute os-login describe-profile' to find it)
 
-# 2. Use kubectl with a modified config
-# (This sed command temporarily points your config to localhost)
-kubectl --kubeconfig=<(sed 's/server: .*/server: https:\/\/localhost:6443/' kubeconfig) get nodes
+gcloud compute ssh talos-gcp-cluster-bastion \
+    --project=api-project-651935823088 \
+    --zone=us-central1-b \
+    --tunnel-through-iap \
+    -- -N -L 6443:10.0.0.5:6443
 ```
 
-> **Note**: Replace `us-central1-b` with your actual `ZONE`.
+**Key Flags:**
+*   **`-N`**: **REQUIRED for non-admins.** Tells SSH "no remote command". If you omit this, the connection will close immediately because the restricted shell denies interactive sessions.
+*   **`-L 6443:10.0.0.5:6443`**: Forwards your local port `6443` to the Cluster's Internal IP `10.0.0.5`.
+
+**Expected Behavior:**
+*   The command will appear to **hang/wait**. This is **NORMAL**.
+*   It means the tunnel is **OPEN** and listening.
+*   **Do not close this terminal window.**
+
+### Step 2: Access Kubernetes
+
+In a separate terminal, point `kubectl` to your local port:
+
+```bash
+# Verify connection
+kubectl get nodes --server=https://localhost:6443 --insecure-skip-tls-verify
+```
+
+---
+
+## SSH Config (Optional Convenience)
+
+For a smoother experience (e.g., just running `ssh k8s-tunnel`), add this to your local `~/.ssh/config`.
+
+**Note:** You must replace `YOUR_USERNAME` with your full OS Login username (e.g., `dietmar_kling_gmail_com`).
+
+```ssh
+# Kubernetes API Tunnel
+Host k8s-tunnel
+    HostName talos-gcp-cluster-bastion
+    User YOUR_USERNAME
+    # Use gcloud as a proxy wrapper to handle IAP and keys automatically
+    ProxyCommand gcloud compute ssh %r@%h --zone=us-central1-b --project=api-project-651935823088 --tunnel-through-iap -- -W %h:%p
+    LocalForward 6443 10.0.0.5:6443
+    RequestTTY no
+    ExitOnForwardFailure yes
+```
+
+**Usage:**
+1.  **Open Tunnel**: `ssh -N k8s-tunnel` (Keeps terminal open)
+2.  **Access**: `kubectl get nodes` (pointed at local port)
+
+---
+
+## Troubleshooting
+
+### "Connection closed by remote host" / "Interactive shell is disabled"
+*   **Cause**: You tried to SSH without `-N` (interactive mode), but you are a standard user.
+*   **Fix**: Non-admins cannot run commands. You must use `-N` for port forwarding.
+
+### "Permission denied (publickey)"
+*   **Cause**: Missing `roles/compute.osLogin` or OS Login keys not synced.
+*   **Fix**: Verify your role. Run `gcloud compute os-login describe-profile` to force a local key sync.
+
+### "Connection failed" (IAP)
+*   **Cause**: Missing `roles/iap.tunnelResourceAccessor`.
+*   **Fix**: Ask an admin to grant the IAP Tunneler role to your account.

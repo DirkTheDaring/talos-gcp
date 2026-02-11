@@ -23,11 +23,27 @@ deploy_cilium() {
     "
 
     # Ensure kubeconfig is on Bastion (Critical for standalone execution)
+    # We use structured path ~/.kube/config to avoid pollution
     if [ -f "${OUTPUT_DIR}/kubeconfig" ]; then
-        log "Pushing local kubeconfig to Bastion..."
-        run_safe gcloud compute scp "${OUTPUT_DIR}/kubeconfig" "${BASTION_NAME}:~/kubeconfig" --zone "${ZONE}" --tunnel-through-iap
+        # Check if we really need to push it (Phase 4 might have done it)
+        # But to be safe for standalone usage:
+        # We don't want to overwrite if it exists? 
+        # Actually, let's assume ~/.kube/config is the source of truth.
+        # But if we are running from local, local might be newer?
+        # For consistency with other functions, we rely on ~/.kube/config being present or we push it there.
+        # However, scp to ~/.kube/config requires the dir to exist.
+        
+        # Let's just trust that phase4/bootstrap populated it.
+        # But if we run `update-cilium` standalone, we might need it.
+        # So we check existence on bastion.
+        if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "test -f ~/.kube/config" &>/dev/null; then
+             log "Pushing local kubeconfig to Bastion (~/.kube/config)..."
+             run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "mkdir -p ~/.kube"
+             run_safe gcloud compute scp "${OUTPUT_DIR}/kubeconfig" "${BASTION_NAME}:~/.kube/config" --zone "${ZONE}" --tunnel-through-iap
+             run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "chmod 600 ~/.kube/config"
+        fi
     else
-        warn "Local kubeconfig not found at ${OUTPUT_DIR}/kubeconfig. Assuming it exists on Bastion."
+        warn "Local kubeconfig not found. Assuming ~/.kube/config exists on Bastion."
     fi
     
     # 1. Add Repo
@@ -140,7 +156,7 @@ EOF
     cat <<EOF > "${OUTPUT_DIR}/install_cilium.sh"
 #!/bin/bash
 set -e
-export KUBECONFIG=./kubeconfig
+export KUBECONFIG=~/.kube/config
 
 # Install/Upgrade Cilium
 helm upgrade --install cilium cilium/cilium --version ${CILIUM_VERSION} \\

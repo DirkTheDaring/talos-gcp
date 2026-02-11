@@ -23,17 +23,40 @@ phase2_workers() {
 
 create_worker_instance() {
     local worker_name="$1"
+    
+    # Build Disk Flags
+    local -a DISK_FLAGS
+    if [ -n "${WORKER_ADDITIONAL_DISKS:-}" ]; then
+        local disk_index=0
+        for disk_def in ${WORKER_ADDITIONAL_DISKS}; do
+            IFS=':' read -r dtype dsize dname <<< "${disk_def}"
+            
+            # Validation: Must have at least type and size
+            if [[ -z "$dtype" || -z "$dsize" ]]; then
+                error "Invalid WORKER_ADDITIONAL_DISKS definition: '${disk_def}'. Format: type:size[:device-name]"
+                exit 1
+            fi
+
+            [ -z "${dname}" ] && dname="disk-${disk_index}"
+            local gcp_disk_name="${worker_name}-disk-${disk_index}"
+            DISK_FLAGS+=("--create-disk=name=${gcp_disk_name},size=${dsize},type=${dtype},device-name=${dname},mode=rw,auto-delete=yes")
+            ((disk_index++))
+        done
+        log "Adding disks to ${worker_name}: ${DISK_FLAGS[*]}"
+    fi
+
     # Workaround: gcloud filter hangs.
     if ! gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${worker_name}$"; then
          log "Creating worker node (${worker_name})..."
          run_safe retry gcloud compute instances create "${worker_name}" \
-            --image "${TALOS_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \
+            --image "${WORKER_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \
             --machine-type="${WORKER_MACHINE_TYPE}" --boot-disk-size="${WORKER_DISK_SIZE}" \
             --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" \
-            --no-address --service-account="${SA_EMAIL}" --scopes cloud-platform \
+            --no-address --service-account="${WORKER_SERVICE_ACCOUNT}" --scopes cloud-platform \
             --tags "talos-worker,${worker_name}" \
-            --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
-            --metadata-from-file=user-data="${OUTPUT_DIR}/worker.yaml"
+            --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${WORKER_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
+            --metadata-from-file=user-data="${OUTPUT_DIR}/worker.yaml" \
+            "${DISK_FLAGS[@]}"
     fi
     ensure_instance_in_ig "${worker_name}" "${IG_WORKER_NAME}"
 }
@@ -52,8 +75,19 @@ prune_workers() {
         # Check if suffix is a number
         if [[ "$suffix" =~ ^[0-9]+$ ]]; then
             if (( suffix >= WORKER_COUNT )); then
-                log "Pruning extra worker node: ${instance} (Index ${suffix} >= ${WORKER_COUNT})..."
+                log "Found extra worker node: ${instance} (Index ${suffix} >= ${WORKER_COUNT})..."
                 
+                # Check for confirmation
+                if [ "${CONFIRM_CHANGES:-true}" == "true" ]; then
+                    read -p "Are you sure you want to DELETE ${instance}? [y/N] " -r
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                        log "Skipping deletion of ${instance}."
+                        continue
+                    fi
+                else
+                     log "Auto-confirming deletion of ${instance} (Non-interactive mode)."
+                fi
+
                 # 1. Remove from Instance Group (idempotent-ish, ignore error if not found)
                 if gcloud compute instance-groups unmanaged list-instances "${IG_WORKER_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" | grep -q "${instance}"; then
                      log "Removing ${instance} from Instance Group ${IG_WORKER_NAME}..."

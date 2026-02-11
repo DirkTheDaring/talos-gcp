@@ -3,7 +3,7 @@
 # Talos GCP Deployment Script
 # Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
 
-set -x
+#set -x
 echo "DEBUG: Script Started"
 set -euo pipefail
 
@@ -15,8 +15,8 @@ CONFIG_FILE=""
 ARGS=()
 
 # Parse early arguments for config file
-for arg in "$@"; do
-    case $arg in
+while [[ $# -gt 0 ]]; do
+    case $1 in
         -c|--config)
             if [ -n "${2:-}" ]; then
                 CONFIG_FILE="$2"
@@ -111,27 +111,29 @@ case "$COMMAND" in
         deploy_all
         ;;
     destroy)
+        # check_dependencies - Not needed
         cleanup
         ;;
     status)
         set_names
-        check_dependencies
+        # check_dependencies - Not needed
         status
         ;;
     diagnose)
         set_names
-        check_dependencies
+        # check_dependencies - Not needed
         diagnose
         ;;
     list-clusters|list)
         set_names
-        check_dependencies
+        # check_dependencies - Not needed
         list_clusters
         ;;
     ssh|ssh-bastion)
         shift
         set_names
-        check_dependencies
+        # check_dependencies - Not needed
+        ensure_admin_access # Ensure we have rights to login
         ssh_command "$@"
         ;;
     get-credentials)
@@ -146,34 +148,86 @@ case "$COMMAND" in
         ;;
     list-instances)
         set_names
-        check_dependencies
+        # check_dependencies - Not needed, only uses gcloud
         list_instances
         ;;
     list-ports)
         set_names
-        check_dependencies
+        # check_dependencies - Not needed
         list_ports
         ;;
     update-ports)
         set_names
-        check_dependencies
+        # check_dependencies - Not needed
         update_ports
         ;;
     public-ip)
         set_names
-        check_dependencies
+        # check_dependencies - Not needed
         public_ip
         ;;
-    scale-up|scale) # Alias 'scale' to 'scale-up' for now, or could handle generic scale
-        scale_up
+    # bastion-user commands removed in favor of Pure IAM.
+    # See 'grant-admin' and 'recreate-bastion'.
+    apply)
+        if [[ "${2:-}" == "-y" ]] || [[ "${2:-}" == "--yes" ]]; then
+            export CONFIRM_CHANGES="false"
+            shift
+        fi
+        apply
         ;;
-    scale-down)
-        scale_down
+
+    recreate-bastion)
+        set_names
+        check_dependencies || return 1
+        ensure_service_account || return 1
+        ensure_admin_access # Ensure we have rights to login to the new one
+        
+        log "Recreating Bastion Host '${BASTION_NAME}'..."
+        
+        if gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
+            log "Deleting existing bastion..."
+            run_safe gcloud compute instances delete "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --quiet
+        fi
+        
+        # Re-run Phase 2b and Phase 4
+        phase2_bastion
+        phase4_bastion
+        
+        log "Bastion recreated successfully."
         ;;
+
+    grant-admin)
+        if [ -z "${2:-}" ]; then
+            error "Usage: ./talos-gcp grant-admin <email>"
+            error "Example: ./talos-gcp grant-admin user@example.com"
+            exit 1
+        fi
+        EMAIL="$2"
+        log "Granting 'roles/compute.osAdminLogin' to '${EMAIL}'..."
+        run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+            --member="user:${EMAIL}" \
+            --role="roles/compute.osAdminLogin"
+        log "Role granted. IAM propagation may take up to 60 seconds."
+        ;;
+
+    list-admins)
+        set_names
+        log "Listing users with 'roles/compute.osAdminLogin' (Bastion Admins)..."
+        gcloud projects get-iam-policy "${PROJECT_ID}" \
+            --flatten="bindings[].members" \
+            --filter="bindings.role:roles/compute.osAdminLogin" \
+            --format="value(bindings.members)" || echo "No admins found or error listing policy."
+        ;;
+
     verify-storage)
         set_names
         check_dependencies
         verify_storage
+        ;;
+    update-labels)
+        set_names
+        check_dependencies
+        update_labels
         ;;
     update-traefik)
         set_names
@@ -181,9 +235,11 @@ case "$COMMAND" in
         update_traefik
         ;;
     start)
+        # check_dependencies - Not needed
         start_nodes
         ;;
     stop)
+        # check_dependencies - Not needed
         stop_nodes
         ;;
     help|--help|-h)

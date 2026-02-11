@@ -116,15 +116,22 @@ The cluster will automatically recover, and nodes will rejoin.
 
 ## 7. Troubleshooting & Known Failures
 
-The deployment script is designed to be **Idempotent**. This means if it fails (e.g., network glitch), you can safely run `./talos-gcp create` again, and it will pick up where it left off.
+## 8. Scaling and Idempotency
 
-### Common Failure Modes
+The deployment script's `apply` command is **idempotent**, meaning it converges the current state of the cluster to the desired state defined in your configuration.
 
-| Error | Cause | Recovery |
-| :--- | :--- | :--- |
-| **IAP Connection Failed (4003)** | The Bastion VM is booting or the Firewall rule hasn't propagated yet. | **Wait 60s** and retry the script (Phase 4). |
-| **Quota Exceeded** | You hit the CPU/IP limit mid-deployment. | Request a quota increase (see [GCP Prep](gcp-preparation.md)), then **Re-run Deploy**. |
-| **Resource Already Exists** | Script tries to create a resource that exists but with different settings. | **Delete** the conflicting resource manually, then **Re-run Deploy**. |
-| **Talos Bootstrap Timeout** | Control Plane is slow to become ready. | **Re-run Phase 5**. The bootstrap command is safe to retry. |
-| **Subnet Deletion Failed** | Cleanup fails because a K8s LoadBalancer service is still active. | Manually delete the `forwarding-rules` shown in the error, then **Re-run Cleanup**. |
+### How `apply` works:
+1.  **Reads Configuration**: Loads `WORKER_COUNT` from `cluster.env` (or environment variables).
+2.  **Identifies Nodes**: Lists all instances with label `cluster=${CLUSTER_NAME}` and role `worker`.
+3.  **Calculates Diff**:
+    *   **Missing Nodes**: If `Current < Target`, it creates new instances (e.g., `worker-3`, `worker-4`).
+    *   **Extra Nodes**: If `Current > Target`, it identifies the highest-indexed nodes for removal.
+4.  **Pruning Safety**:
+    *   Before deleting any node, the script **prompts for confirmation** (`Are you sure you want to DELETE...?`).
+    *   To bypass this prompt (e.g., in CI/CD pipelines), use the `--yes` or `-y` flag:
+        ```bash
+        ./talos-gcp apply --yes
+        ```
+
+This design allows you to manage the cluster size declaratively by simply updating the `WORKER_COUNT` variable.
 

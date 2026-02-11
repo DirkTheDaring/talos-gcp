@@ -46,7 +46,7 @@ list_clusters() {
         if [ -z "$K8S_VER" ]; then K8S_VER="unknown"; fi
         if [ -z "$CILIUM_VER" ]; then CILIUM_VER="unknown"; fi
         
-        if [ -z "$CILIUM_VER" ]; then CILIUM_VER="unknown"; fi
+
         
         # Determine Region
         local CLUSTER_REGION="${CLUSTER_ZONE%-*}"
@@ -106,26 +106,48 @@ get_credentials() {
     fi
     
     # 4. Generate Configs
-    log "Regenerating Talos/Kube config (Endpoint: https://${CP_ILB_IP}:6443)..."
+    log "Regenerating Talos config (Endpoint: https://${CP_ILB_IP}:6443)..."
     
+    # Clean up existing configs to prevent talosctl errors
+    rm -f "${OUTPUT_DIR}/controlplane.yaml" "${OUTPUT_DIR}/worker.yaml" "${OUTPUT_DIR}/talosconfig" "${OUTPUT_DIR}/kubeconfig" "${OUTPUT_DIR}/kubeconfig.local"
+
     # We can rely on 'talosctl' being available because check_dependencies runs first
     # and installs it if missing.
+    # Note: 'gen config' creates talosconfig, controlplane.yaml, worker.yaml
     run_safe talosctl gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${OUTPUT_DIR}/secrets.yaml" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
 
-    # Also extract kubeconfig
-    log "Generating kubeconfig..."
+    # Configure talosconfig endpoint
     run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" config endpoint "https://${CP_ILB_IP}:6443"
-    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" --nodes "${CP_ILB_IP}" kubeconfig "${OUTPUT_DIR}/kubeconfig"
+    
+    # 5. Fetch Kubeconfig from Bastion
+    # We cannot run 'talosctl ... kubeconfig' locally because the API is internal.
+    # The Bastion already has a valid ~/.kube/config generated during bootstrap/recreation.
+    log "Fetching kubeconfig from Bastion..."
+    if ! gcloud compute scp "${BASTION_NAME}:~/.kube/config" "${OUTPUT_DIR}/kubeconfig" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap; then
+        error "Failed to fetch kubeconfig from Bastion. Is the Bastion running?"
+        exit 1
+    fi
+     
+    # Generate Tunnel-Friendly Kubeconfig (localhost)
+    # This allows users to use 'kubectl' via 'gcloud compute ssh ... -L 6443:IP:6443' without adding --server flag
+    cp "${OUTPUT_DIR}/kubeconfig" "${OUTPUT_DIR}/kubeconfig.local"
+    sed -i "s|https://${CP_ILB_IP}:6443|https://127.0.0.1:6443|g" "${OUTPUT_DIR}/kubeconfig.local"
 
     
     echo ""
     log "Credentials saved to: ${OUTPUT_DIR}"
     echo "------------------------------------------------"
     echo "NOTE: Control Plane is INTERNAL (${CP_ILB_IP})."
-    echo "To access, use the Bastion host:"
-    echo "  gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap --project ${PROJECT_ID}"
+    echo "Files:"
+    echo "  - ${OUTPUT_DIR}/kubeconfig        (Internal IP)"
+    echo "  - ${OUTPUT_DIR}/kubeconfig.local  (Localhost / Tunnel)"
     echo ""
-    echo "Then use talosctl/kubectl from the Bastion, or set up a tunnel."
+    echo "To access from your workstation:"
+    echo "  1. Start Tunnel:"
+    echo "     gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap --project ${PROJECT_ID} -- -L 6443:${CP_ILB_IP}:6443 -N"
+    echo "  2. Use Local Config:"
+    echo "     export KUBECONFIG=${OUTPUT_DIR}/kubeconfig.local"
+    echo "     kubectl get nodes"
     echo "------------------------------------------------"
 }
 
@@ -146,8 +168,8 @@ update_cilium() {
     
     if [ -n "$INSTANCES" ]; then
         for instance in $INSTANCES; do
-                log "Updating label for ${instance}..."
-                run_safe gcloud compute instances add-labels "${instance}" --labels="cilium-version=${CILIUM_LABEL}" --zone "${ZONE}" --project="${PROJECT_ID}"
+            log "Updating label for ${instance}..."
+            run_safe gcloud compute instances add-labels "${instance}" --labels="cilium-version=${CILIUM_LABEL}" --zone "${ZONE}" --project="${PROJECT_ID}"
         done
         log "Labels updated."
     else
@@ -158,23 +180,23 @@ update_cilium() {
 }
 
 list_instances() {
-    set_names
     log "Listing instances for cluster '${CLUSTER_NAME}' (Project: ${PROJECT_ID})..."
     
-    # Check if any instances exist
-    if ! gcloud compute instances list --filter="labels.cluster=${CLUSTER_NAME}" --project="${PROJECT_ID}" --limit=1 &> /dev/null; then
-        warn "No instances found for cluster '${CLUSTER_NAME}'."
-        return
-    fi
-    
     # List Instances with custom columns
-    # NAME, ZONE, INTERNAL_IP, EXTERNAL_IP, STATUS
-    gcloud compute instances list \
+    # NAME, ZONE, MACHINE_TYPE, INTERNAL_IP, EXTERNAL_IP, STATUS
+    # We capture output to check for emptiness without a second call.
+    local OUTPUT
+    OUTPUT=$(gcloud compute instances list \
         --filter="labels.cluster=${CLUSTER_NAME}" \
         --project="${PROJECT_ID}" \
         --sort-by=name \
-        --format="table(name, zone.basename(), networkInterfaces[0].networkIP:label=INTERNAL_IP, networkInterfaces[0].accessConfigs[0].natIP:label=EXTERNAL_IP, status)"
-        
+        --format="table(name, zone.basename(), machineType.basename(), networkInterfaces[0].networkIP:label=INTERNAL_IP, networkInterfaces[0].accessConfigs[0].natIP:label=EXTERNAL_IP, status)")
+
+    if [ -z "$OUTPUT" ]; then
+        warn "No instances found for cluster '${CLUSTER_NAME}'."
+    else
+        echo "$OUTPUT"
+    fi
     echo ""
 }
 
@@ -184,8 +206,8 @@ list_ports() {
     # Check for required tools
     for cmd in jq column; do
         if ! command -v "$cmd" &> /dev/null; then
-                error "Command '$cmd' is required for list-ports but not installed."
-                return 1
+            error "Command '$cmd' is required for list-ports but not installed."
+            return 1
         fi
     done
 
@@ -281,9 +303,108 @@ status() {
 }
 
 
+update_labels() {
+    log "Updating instance labels based on runtime versions..."
+    
+    # Prereq: Bastion must be up
+    if ! gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
+        error "Bastion host '${BASTION_NAME}' not found. Cannot connect to cluster."
+        return 1
+    fi
+
+    # Retrieve Version Info via Bastion (using kubectl)
+    log "Retrieving versions from cluster..."
+
+    # Check for kubeconfig
+    if ! (ssh_command "[ -f ./kubeconfig ]"); then
+        error "Kubeconfig not found on Bastion (~/kubeconfig). Cannot query cluster."
+        error "Try running 'verify-storage' or checking if the cluster is bootstrapped."
+        return 1
+    fi
+    
+    # 1. Kubernetes Version
+    local K8S_VER_ACTUAL
+    K8S_VER_ACTUAL=$(ssh_command kubectl --kubeconfig ./kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')
+    
+    if [ -z "$K8S_VER_ACTUAL" ]; then
+        error "Failed to retrieve Kubernetes version. Is the cluster API reachable? Check 'verify-storage' or 'diagnose'."
+        return 1
+    fi
+    
+    # 2. Talos Version
+    local TALOS_VER_ACTUAL
+    TALOS_VER_ACTUAL=$(ssh_command kubectl --kubeconfig ./kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.nodeInfo.osImage}')
+    # Clean up: "Talos (v1.12.3)" -> "v1.12.3"
+    TALOS_VER_ACTUAL=$(echo "$TALOS_VER_ACTUAL" | awk -F'[()]' '{print $2}')
+    
+    if [ -z "$TALOS_VER_ACTUAL" ]; then
+        warn "Failed to retrieve Talos version. Defaulting to configured version: ${TALOS_VERSION}"
+        TALOS_VER_ACTUAL="${TALOS_VERSION}"
+    fi
+
+    # 3. Cilium Version
+    local CILIUM_VER_ACTUAL
+    CILIUM_VER_ACTUAL=$(ssh_command kubectl --kubeconfig ./kubeconfig -n kube-system get deployment cilium-operator -o jsonpath='{.spec.template.spec.containers[0].image}')
+    
+    if [ -z "$CILIUM_VER_ACTUAL" ]; then
+         warn "Cilium operator not found. Defaulting to configured version: ${CILIUM_VERSION}"
+         CILIUM_VER_ACTUAL="${CILIUM_VERSION}"
+    else
+        # Extract version from image (repo/image:tag or repo/image:tag@sha256:...)
+        # We assume standard tagging: ...:v1.16.6...
+        # 1. Remove everything before the first colon (repo/image:)
+        # 2. Remove everything after @ (digest)
+        CILIUM_VER_ACTUAL=$(echo "$CILIUM_VER_ACTUAL" | cut -d: -f2 | cut -d@ -f1)
+        
+        # Remove 'v' prefix if present (e.g. v1.16.6 -> 1.16.6)
+        CILIUM_VER_ACTUAL="${CILIUM_VER_ACTUAL#v}"
+    fi
+
+    log "Detected Versions:"
+    log "  Kubernetes: $K8S_VER_ACTUAL"
+    log "  Talos:      $TALOS_VER_ACTUAL"
+    log "  Cilium:     $CILIUM_VER_ACTUAL"
+
+    # Sanitize for GCP Labels
+    # Rules: lowercase, numbers, hyphens only.
+    # We replace any other character (dots, pluses, etc.) with hyphens.
+    local L_K8S
+    local L_TALOS
+    local L_CILIUM
+    
+    L_K8S=$(echo "${K8S_VER_ACTUAL}" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' '-')
+    L_TALOS=$(echo "${TALOS_VER_ACTUAL}" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' '-')
+    L_CILIUM=$(echo "${CILIUM_VER_ACTUAL}" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' '-')
+    
+    # Remove trailing hyphens if any (tr -c adds hyphen for newline too)
+    L_K8S="${L_K8S%-}"
+    L_TALOS="${L_TALOS%-}"
+    L_CILIUM="${L_CILIUM%-}"
+
+    # Update Labels on ALL Cluster Instances (CP + Worker + Bastion)
+    local INSTANCES
+    INSTANCES=$(gcloud compute instances list --filter="labels.cluster=${CLUSTER_NAME} OR name:${BASTION_NAME}" --format="value(name,zone)" --project="${PROJECT_ID}")
+    
+    if [ -z "$INSTANCES" ]; then
+        warn "No instances found for cluster '${CLUSTER_NAME}'."
+        return
+    fi
+    
+    # Loop line by line
+    echo "$INSTANCES" | while read -r name zone; do
+        if [ -z "$name" ]; then continue; fi
+        log "Updating labels for $name ($zone)..."
+        run_safe gcloud compute instances add-labels "$name" --zone "$zone" --labels="k8s-version=${L_K8S},talos-version=${L_TALOS},cilium-version=${L_CILIUM}" --project="${PROJECT_ID}"
+    done
+    
+    log "Labels updated successfully."
+}
+
+
+
 diagnose() {
     set_names
-    check_dependencies
+    # check_dependencies - Not needed
     
     echo "========================================="
     echo " Talos GCP Diagnostics"

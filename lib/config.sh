@@ -9,8 +9,23 @@ ARCH="${ARCH:-amd64}"
 # Versions
 TALOS_VERSION="${TALOS_VERSION:-v1.12.3}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.32.0}"
+# Strict jq checking is in lib/utils.sh - make sure to install jq!
+# Global Variables
+ARCH=$(uname -m)
+if [[ "$ARCH" == "x86_64" ]]; then ARCH="amd64"; fi
+if [[ "$ARCH" == "aarch64" ]]; then ARCH="arm64"; fi
+export ARCH
+
 HELM_VERSION="${HELM_VERSION:-v3.16.2}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.18.6}"
+
+# Mixed Role Versions (Default to global TALOS_VERSION)
+CP_TALOS_VERSION="${CP_TALOS_VERSION:-$TALOS_VERSION}"
+WORKER_TALOS_VERSION="${WORKER_TALOS_VERSION:-$TALOS_VERSION}"
+
+# Extensions (Comma-separated, e.g. "siderolabs/gvisor,siderolabs/nvidia-container-toolkit")
+CP_EXTENSIONS="${CP_EXTENSIONS:-}"
+WORKER_EXTENSIONS="${WORKER_EXTENSIONS:-}"
 
 # Network
 VPC_NAME="${VPC_NAME:-${CLUSTER_NAME}-vpc}"
@@ -26,6 +41,7 @@ CP_DISK_SIZE="${CP_DISK_SIZE:-200GB}"
 WORKER_DISK_SIZE="${WORKER_DISK_SIZE:-200GB}"
 CP_COUNT="${CP_COUNT:-1}"
 WORKER_COUNT="${WORKER_COUNT:-1}"
+WORKER_ADDITIONAL_DISKS="${WORKER_ADDITIONAL_DISKS:-}"
 
 # Features
 INSTALL_CILIUM="${INSTALL_CILIUM:-true}"
@@ -34,6 +50,8 @@ INSTALL_CSI="${INSTALL_CSI:-true}"
 
 # Ingress
 # Default: Empty (Use update-traefik / CCM. If utilizing HostPort/DaemonSet, set to "80,443")
+# Ingress Defaults
+INGRESS_IP_COUNT="${INGRESS_IP_COUNT:-1}"
 INGRESS_IPV4_CONFIG="${INGRESS_IPV4_CONFIG:-}"
 
 # Labels (Default: Empty)
@@ -76,7 +94,7 @@ set_names() {
     IG_WORKER_NAME="${CLUSTER_NAME}-ig-worker"
 
     # Bastion Image
-    BASTION_IMAGE_FAMILY="${BASTION_IMAGE_FAMILY:-ubuntu-2204-lts}"
+    BASTION_IMAGE_FAMILY="${BASTION_IMAGE_FAMILY:-ubuntu-2404-lts-amd64}"
     BASTION_IMAGE_PROJECT="${BASTION_IMAGE_PROJECT:-ubuntu-os-cloud}"
     
     # Firewall Rules
@@ -103,6 +121,10 @@ set_names() {
     # Service Account (Truncate if needed, but check_cluster_name enforces <20 so -sa is safe)
     SA_NAME="${CLUSTER_NAME}-sa"
     SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+    
+    # Role-specific Service Accounts (Default to the main cluster SA)
+    CP_SERVICE_ACCOUNT="${CP_SERVICE_ACCOUNT:-$SA_EMAIL}"
+    WORKER_SERVICE_ACCOUNT="${WORKER_SERVICE_ACCOUNT:-$SA_EMAIL}"
     
     # Directory Isolation
     OUTPUT_DIR="$(pwd)/_out/${CLUSTER_NAME}"

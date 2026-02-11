@@ -22,14 +22,30 @@ phase5_register() {
     fi
     
     log "Preparing bootstrap script..."
+    # Use structured paths to keep HOME clean ($HOME/.talos/config)
+    # Phase 4 should have already populated ~/.talos/config
     cat <<EOF > "${OUTPUT_DIR}/bootstrap_cluster.sh"
 #!/bin/bash
-talosctl --talosconfig talosconfig config endpoint ${CONTROL_PLANE_0_IP}
-talosctl --talosconfig talosconfig config node ${CONTROL_PLANE_0_IP}
+mkdir -p ~/.talos ~/.kube
+TALOSCONFIG=~/.talos/config
+
+if [ ! -f "\$TALOSCONFIG" ]; then
+    echo "Error: \$TALOSCONFIG not found. Did Phase 4 fail?"
+    # Fallback: check CWD just in case
+    if [ -f "talosconfig" ]; then
+        echo "Found talosconfig in CWD, moving to \$TALOSCONFIG"
+        mv talosconfig "\$TALOSCONFIG"
+    else
+        exit 1
+    fi
+fi
+
+talosctl --talosconfig "\$TALOSCONFIG" config endpoint ${CONTROL_PLANE_0_IP}
+talosctl --talosconfig "\$TALOSCONFIG" config node ${CONTROL_PLANE_0_IP}
 echo "Bootstrapping Cluster..."
 # Bootstrap can race with node readiness, retry it
 for i in {1..20}; do
-    OUTPUT=\$(talosctl --talosconfig talosconfig bootstrap 2>&1)
+    OUTPUT=\$(talosctl --talosconfig "\$TALOSCONFIG" bootstrap 2>&1)
     EXIT_CODE=\$?
 
     if [ \$EXIT_CODE -eq 0 ]; then
@@ -47,8 +63,11 @@ done
 
 echo "Waiting for kubeconfig generation (certificate signing)..."
 for i in {1..30}; do
-    if talosctl --talosconfig talosconfig kubeconfig .; then
+    # Save to ~/.kube/config directly (Updated/Verified)
+    if talosctl --talosconfig "\$TALOSCONFIG" kubeconfig ~/.kube/config; then
         echo "Kubeconfig retrieved successfully!"
+        # Set permissions for security
+        chmod 600 ~/.kube/config
         exit 0
     fi
     echo "Waiting for API Server to provide Kubeconfig... (Attempt \$i/30, max 5m)"
@@ -60,13 +79,15 @@ EOF
     chmod +x "${OUTPUT_DIR}/bootstrap_cluster.sh"
 
     log "Pushing configs to Bastion..."
-    run_safe retry gcloud compute scp "${OUTPUT_DIR}/talosconfig" "${OUTPUT_DIR}/bootstrap_cluster.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+    # Only copy the bootstrap script. configs are handled by phase4.
+    run_safe retry gcloud compute scp "${OUTPUT_DIR}/bootstrap_cluster.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
     
     log "Executing bootstrap on Bastion..."
-    run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./bootstrap_cluster.sh"
+    run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./bootstrap_cluster.sh && rm bootstrap_cluster.sh"
     
     log "Retrieving kubeconfig..."
-    run_safe gcloud compute scp "${BASTION_NAME}:~/kubeconfig" "${OUTPUT_DIR}/kubeconfig" --zone "${ZONE}" --tunnel-through-iap
+    # Retrieve from structured path
+    run_safe gcloud compute scp "${BASTION_NAME}:~/.kube/config" "${OUTPUT_DIR}/kubeconfig" --zone "${ZONE}" --tunnel-through-iap
     
     # Secure the kubeconfig
     chmod 600 "${OUTPUT_DIR}/kubeconfig" "${OUTPUT_DIR}/talosconfig"
@@ -87,6 +108,27 @@ EOF
     if [ "${INSTALL_CSI}" == "true" ]; then
         deploy_csi
     fi
+
+    # Final Step: Sync updated configs to /etc/skel for future admins
+    # We revert talosconfig endpoint to VIP (ILB) before syncing, so admins use the stable address
+    # (Bootstrap used Node IP, but we want VIP for long-term use)
+    local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
+    
+    log "Finalizing /etc/skel configuration..."
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
+        # 1. Revert talosconfig to use VIP
+        talosctl --talosconfig ~/.talos/config config endpoint ${CP_ILB_IP}
+        talosctl --talosconfig ~/.talos/config config node ${CP_ILB_IP}
+
+        # 2. Sync to /etc/skel
+        sudo mkdir -p /etc/skel/.kube /etc/skel/.talos
+        sudo cp ~/.kube/config /etc/skel/.kube/config
+        sudo cp ~/.talos/config /etc/skel/.talos/config
+        
+        # 3. Secure permissions (600 = Owner only)
+        sudo chmod -R 755 /etc/skel/.kube /etc/skel/.talos
+        sudo chmod 600 /etc/skel/.kube/config /etc/skel/.talos/config ~/.talos/config ~/.kube/config
+    "
 }
 
 deploy_ccm() {
@@ -186,8 +228,9 @@ EOF
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
         for i in {1..20}; do
             echo 'Attempting to create gcp-service-account secret (Attempt \$i/20)...'
-            if ! kubectl --kubeconfig ./kubeconfig get secret -n kube-system gcp-service-account &>/dev/null; then
-                    if kubectl --kubeconfig ./kubeconfig create secret generic gcp-service-account --from-file=key.json=service-account.json -n kube-system; then
+            # Use structured kubeconfig path
+            if ! kubectl --kubeconfig ~/.kube/config get secret -n kube-system gcp-service-account &>/dev/null; then
+                    if kubectl --kubeconfig ~/.kube/config create secret generic gcp-service-account --from-file=key.json=service-account.json -n kube-system; then
                         echo 'Secret created successfully.'
                         break
                     fi
@@ -209,7 +252,7 @@ EOF
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
         for i in {1..20}; do
             echo 'Attempting to apply CCM manifest (Attempt \$i/20)...'
-            if kubectl --kubeconfig ./kubeconfig apply --validate=false -f gcp-ccm.yaml; then
+            if kubectl --kubeconfig ~/.kube/config apply --validate=false -f gcp-ccm.yaml; then
                 rm gcp-ccm.yaml
                 exit 0
             fi
@@ -281,7 +324,7 @@ EOF
     # Apply using Direct IP of CP-0 because VIP is not yet active on nodes
     log "Applying VIP Alias using Direct IP (${CP_0_IP})..."
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
-        cp kubeconfig kubeconfig.direct
+        cp ~/.kube/config kubeconfig.direct
         sed -i 's/${CP_ILB_IP}/${CP_0_IP}/g' kubeconfig.direct
         
         for i in {1..20}; do
@@ -356,23 +399,23 @@ EOF
         exit 1
     fi
     
-    # 3. Create Setup Script for Bastion
+    # Create Setup Script for Bastion
     cat <<EOF > "${OUTPUT_DIR}/csi-setup.sh"
 #!/bin/bash
 set -e
 
 # Fix: Explicitly Create Namespace (Idempotent)
-kubectl --kubeconfig ./kubeconfig create namespace gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ./kubeconfig apply -f -
+kubectl --kubeconfig ~/.kube/config create namespace gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
 
 # Apply Patched Manifests
-kubectl --kubeconfig ./kubeconfig apply -f csi-driver-patched.yaml
+kubectl --kubeconfig ~/.kube/config apply -f csi-driver-patched.yaml
 
 # Fix: Label for Pod Security Admission (Privileged)
-kubectl --kubeconfig ./kubeconfig label namespace gce-pd-csi-driver pod-security.kubernetes.io/enforce=privileged --overwrite
+kubectl --kubeconfig ~/.kube/config label namespace gce-pd-csi-driver pod-security.kubernetes.io/enforce=privileged --overwrite
 
 # Fix: Create Secret for GCP Auth
 if [ -f "service-account.json" ]; then
-    kubectl --kubeconfig ./kubeconfig create secret generic cloud-sa --from-file=cloud-sa.json=service-account.json -n gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ./kubeconfig apply -f -
+    kubectl --kubeconfig ~/.kube/config create secret generic cloud-sa --from-file=cloud-sa.json=service-account.json -n gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
 else
     echo "Warning: service-account.json not found, skipping secret creation."
 fi
@@ -390,7 +433,7 @@ EOF
     run_safe gcloud compute scp "${OUTPUT_DIR}/csi-driver-patched.yaml" "${OUTPUT_DIR}/csi-setup.sh" "${OUTPUT_DIR}/service-account.json" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
     
     log "Executing CSI setup on Bastion..."
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./csi-setup.sh && rm csi-setup.sh csi-driver-patched.yaml"
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./csi-setup.sh && rm csi-setup.sh csi-driver-patched.yaml service-account.json"
     rm -f "${OUTPUT_DIR}/csi-driver.sh" "${OUTPUT_DIR}/csi-driver-original.yaml" "${OUTPUT_DIR}/csi-driver-patched.yaml" "${OUTPUT_DIR}/patch_csi.py" "${OUTPUT_DIR}/csi-setup.sh"
     
     # Init StorageClasses
@@ -421,6 +464,6 @@ volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
 EOF
     run_safe gcloud compute scp "${OUTPUT_DIR}/storageclass.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig apply -f storageclass.yaml && rm storageclass.yaml"
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ~/.kube/config apply -f storageclass.yaml && rm storageclass.yaml"
     rm -f "${OUTPUT_DIR}/storageclass.yaml"
 }

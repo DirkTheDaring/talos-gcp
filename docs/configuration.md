@@ -24,6 +24,16 @@ This document lists all environment variables that can be used to configure `tal
 | `WORKER_DISK_SIZE` | `${DEFAULT_DISK_SIZE}` | Boot disk size for Worker nodes. |
 | `CP_COUNT` | `3` | Number of Control Plane nodes to deploy. |
 | `WORKER_COUNT` | `1` | Initial number of Worker nodes to deploy. |
+| `WORKER_ADDITIONAL_DISKS` | (Empty) | Space-separated list of additional disks to attach to worker nodes. Format: `type:size[:device-name]` (e.g., `pd-ssd:100GB:fast-data`). Device name is optional and defaults to `disk-N`. |
+
+## Mixed Role Versions & Extensions (Advanced)
+
+| Variable | Default (or Derived From) | Description |
+| :--- | :--- | :--- |
+| `CP_TALOS_VERSION` | `${TALOS_VERSION}` | Specific Talos version for Control Plane. |
+| `WORKER_TALOS_VERSION` | `${TALOS_VERSION}` | Specific Talos version for Workers. |
+| `CP_EXTENSIONS` | (Empty) | Comma-separated list of system extensions for Control Plane (e.g., `siderolabs/gvisor`). |
+| `WORKER_EXTENSIONS` | (Empty) | Comma-separated list of system extensions for Workers. |
 
 ## Networking Configuration
 
@@ -50,7 +60,7 @@ This document lists all environment variables that can be used to configure `tal
 
 | Variable | Default (or Derived From) | Description |
 | :--- | :--- | :--- |
-| `BASTION_IMAGE_FAMILY` | `ubuntu-2204-lts` | Image family for the Bastion host. |
+| `BASTION_IMAGE_FAMILY` | `ubuntu-2404-lts-amd64` | Image family for the Bastion host. |
 | `BASTION_IMAGE_PROJECT` | `ubuntu-os-cloud` | GCP Project for the Bastion image. |
 | `LABELS` | `managed-by=talos-script,environment=dev` | Comma-separated key=value pairs for GCP Labels applied to instances. Version labels (`talos-version`, `k8s-version`) are automatically appended. |
 | `CLOUDSDK_CORE_DISABLE_PROMPTS`| `1` | Disables interactive prompts from `gcloud`. Set automatically by the script but can be overridden. |

@@ -50,7 +50,7 @@ run_safe() {
 check_dependencies() {
     log "Checking dependencies..."
     # strict dependencies
-    for cmd in gcloud gsutil curl envsubst python3; do
+    for cmd in gcloud gsutil curl envsubst python3 jq; do
         if ! command -v "$cmd" &> /dev/null; then
              error "$cmd is required but not installed."
              exit 1
@@ -78,14 +78,8 @@ check_dependencies() {
             warn "Local talosctl version mismatch or missing."
             log "Downloading talosctl ${TALOS_VERSION}..."
             
-            # Detect OS/Arch
-            local OS ARCH
-            OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-            ARCH=$(uname -m)
-            if [[ "$ARCH" == "x86_64" ]]; then ARCH="amd64"; fi
-            if [[ "$ARCH" == "aarch64" ]]; then ARCH="arm64"; fi
-            
             # Download Talosctl
+            local OS=$(uname -s | tr '[:upper:]' '[:lower:]')
             if ! curl -L -o "${TOOLS_DIR}/talosctl" "https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}/talosctl-${OS}-${ARCH}"; then
                  error "Failed to download talosctl."
                  exit 1
@@ -110,11 +104,7 @@ check_dependencies() {
         else
             log "kubectl not found or warning: version mismatch (Want ${KUBECTL_VERSION}). Downloading..."
             
-            local OS ARCH
-            OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-            ARCH=$(uname -m)
-            if [[ "$ARCH" == "x86_64" ]]; then ARCH="amd64"; fi
-            if [[ "$ARCH" == "aarch64" ]]; then ARCH="arm64"; fi
+            local OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 
             if ! curl -Lo "${TOOLS_DIR}/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${OS}/${ARCH}/kubectl"; then
                  warn "Failed to download kubectl ${KUBECTL_VERSION}. Continuing with existing version if any."
@@ -298,3 +288,40 @@ check_quotas() {
         exit 1
     fi
 }
+
+# Auto-Grant Admin Access
+ensure_admin_access() {
+    log "Checking Admin Access (OS Login)..."
+    
+    # Get current user/service-account
+    local CURRENT_ACCOUNT
+    CURRENT_ACCOUNT=$(gcloud config get-value account 2>/dev/null)
+    
+    if [ -z "$CURRENT_ACCOUNT" ]; then
+        warn "Could not determine current gcloud user. Skipping Admin Grant."
+        return
+    fi
+    
+    log "Current User: $CURRENT_ACCOUNT"
+    
+    # Check if they have the role
+    # heuristic: verify if policy contains the binding
+    if gcloud projects get-iam-policy "${PROJECT_ID}" --flatten="bindings[].members" --format="table(bindings.role)" --filter="bindings.members:${CURRENT_ACCOUNT}" 2>/dev/null | grep -q "roles/compute.osAdminLogin"; then
+        log "✅ User has 'roles/compute.osAdminLogin'. Admin access confirmed."
+    else
+        warn "User missing 'roles/compute.osAdminLogin'."
+        log "Attempting to auto-grant Admin role..."
+        if run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+            --member="user:${CURRENT_ACCOUNT}" \
+            --role="roles/compute.osAdminLogin" >/dev/null; then
+            log "✅ Successfully granted 'roles/compute.osAdminLogin' to ${CURRENT_ACCOUNT}."
+            log "Waiting 15s for IAM propagation..."
+            sleep 15
+        else
+            error "Failed to auto-grant Admin role."
+            error "You must manually grant 'Compute OS Admin Login' to ${CURRENT_ACCOUNT}."
+            # We don't exit here; let the bastion safety net handle it.
+        fi
+    fi
+}
+

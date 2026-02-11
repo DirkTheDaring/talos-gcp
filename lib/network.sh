@@ -117,188 +117,217 @@ ensure_backends() {
 
 
 apply_ingress() {
-    log "Applying Ingress Configuration (TCP/UDP)..."
+    log "Applying Ingress Configuration..."
     ensure_backends
     
-    IFS=';' read -ra ADDR <<< "$INGRESS_IPV4_CONFIG"
-    local idx=0
-    for group_config in "${ADDR[@]}"; do
-         local ip_name="${CLUSTER_NAME}-ingress-v4-${idx}"
-         
-         log "Configuring Ingress IPv4 Group $idx: Config=[$group_config]..."
-         
-         # 1. Reserve/Get IP
-         if ! gcloud compute addresses describe "${ip_name}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+    # --- PHASE 1: IP Provisioning ---
+    log "Phase 1: Reconciling Static IPs (Count: ${INGRESS_IP_COUNT})..."
+    
+    # 1. Create/Verify IPs up to Count
+    for (( i=0; i<INGRESS_IP_COUNT; i++ )); do
+        local ip_name="${CLUSTER_NAME}-ingress-v4-${i}"
+        if ! gcloud compute addresses describe "${ip_name}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+             log "Creating IP address '${ip_name}'..."
              run_safe gcloud compute addresses create "${ip_name}" --region "${REGION}" --project="${PROJECT_ID}"
-         fi
-         local ip_addr=$(gcloud compute addresses describe "${ip_name}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
-         log "  -> IP Allocated: ${ip_addr}"
-         
-         # 2. Parse Ports (TCP vs UDP)
-         local tcp_ports=""
-         local udp_ports=""
-         
-         IFS=',' read -ra ITEMS <<< "$group_config"
-         for item in "${ITEMS[@]}"; do
-             if [[ "$item" == */udp ]]; then
-                 # UDP Only: "53/udp" -> UDP:53
-                 local port=${item%/udp}
-                 udp_ports="${udp_ports},${port}"
-             elif [[ "$item" == */tcp ]]; then
-                 # TCP Only: "80/tcp" -> TCP:80
-                 local port=${item%/tcp}
-                 tcp_ports="${tcp_ports},${port}"
-             else
-                 # Default: "80" -> TCP:80 AND UDP:80 (Both)
-                 local port="$item"
-                 tcp_ports="${tcp_ports},${port}"
-                 udp_ports="${udp_ports},${port}"
-             fi
-         done
-         
-         # Deduplicate & Sort (Robust Logic)
-         if [ -n "$tcp_ports" ]; then
-             # Replace commas with newlines, sort unique numeric, join with commas
-             # handle potentially empty elements from leading/trailing commas
-             tcp_ports=$(echo "${tcp_ports//,/$'\n'}" | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
-         fi
-         if [ -n "$udp_ports" ]; then
-             udp_ports=$(echo "${udp_ports//,/$'\n'}" | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
-         fi
-         
-         # 3. Apply TCP Forwarding Rule
-         # Cleanup legacy rule (without -tcp suffix) if exists
-         local rule_name_legacy="${CLUSTER_NAME}-ingress-v4-rule-${idx}"
-         if gcloud compute forwarding-rules describe "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-             log "Removing legacy forwarding rule ${rule_name_legacy}..."
-             run_safe gcloud compute forwarding-rules delete "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" -q
-         fi
+        else
+             log "IP address '${ip_name}' exists."
+        fi
+    done
 
-         local rule_name_tcp="${CLUSTER_NAME}-ingress-v4-rule-${idx}-tcp"
-         if [ -n "$tcp_ports" ]; then
-             if ! gcloud compute forwarding-rules describe "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-                  # Create
-                  run_safe gcloud compute forwarding-rules create "${rule_name_tcp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=TCP --ports="${tcp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_NAME}" --project="${PROJECT_ID}"
-             else
-                  # Optimization: Check if ports match
-                  local current_ports
-                  # Get ports, replace commas/semicolons with newlines, sort numeric unique, join with comma
-                  current_ports=$(gcloud compute forwarding-rules describe "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" --format="value(ports)" | tr ';,' '\n' | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
-                  
-                  if [[ "$current_ports" == "$tcp_ports" ]]; then
-                      log "TCP rule ${rule_name_tcp} is up to date."
-                  else
-                      log "Updating TCP rule ${rule_name_tcp} (Ports: $current_ports -> $tcp_ports)..."
-                      run_safe gcloud compute forwarding-rules delete "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" -q
-                      run_safe gcloud compute forwarding-rules create "${rule_name_tcp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=TCP --ports="${tcp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_NAME}" --project="${PROJECT_ID}"
-                  fi
+    # 2. Prune IPs beyond Count (Cleanup)
+    # We check a reasonable range above count (e.g. +10) just in case
+    local prune_start=$INGRESS_IP_COUNT
+    while true; do
+        local ip_name="${CLUSTER_NAME}-ingress-v4-${prune_start}"
+        if gcloud compute addresses describe "${ip_name}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+             log "Removing orphaned IP address '${ip_name}' (Index ${prune_start} >= Count ${INGRESS_IP_COUNT})..."
+             run_safe gcloud compute addresses delete "${ip_name}" --region "${REGION}" --project="${PROJECT_ID}" -q
+        else
+             # If we don't find one, we assume we've cleaned them all up (contiguous assumption)
+             break
+        fi
+        prune_start=$((prune_start+1))
+    done
+
+    # --- PHASE 2: Rule Reconciliation (Forwarding & Firewall) ---
+    log "Phase 2: Reconciling Forwarding & Firewall Rules (Based on INGRESS_IPV4_CONFIG)..."
+    
+    # Parse Config
+    # Parse Config
+    IFS=';' read -ra CONFIG_ADDR <<< "$INGRESS_IPV4_CONFIG"
+    
+    # Warning for config mismatch
+    if [ "${#CONFIG_ADDR[@]}" -gt "$INGRESS_IP_COUNT" ]; then
+        warn "INGRESS_IPV4_CONFIG contains ${#CONFIG_ADDR[@]} entries, but INGRESS_IP_COUNT is only ${INGRESS_IP_COUNT}."
+        warn "Entries beyond index $((INGRESS_IP_COUNT-1)) will be ignored."
+    fi
+    
+    # Loop through ALL reserved IPs (0 to Count-1)
+    # If config exists for index, Apply Rules.
+    # If config missing/empty for index, Delete Rules.
+    
+    for (( i=0; i<INGRESS_IP_COUNT; i++ )); do
+         local group_config="${CONFIG_ADDR[$i]:-}" # Get config for this index, default empty
+         
+         local ip_name="${CLUSTER_NAME}-ingress-v4-${i}"
+         local rule_name_tcp="${CLUSTER_NAME}-ingress-v4-rule-${i}-tcp"
+         local rule_name_udp="${CLUSTER_NAME}-ingress-v4-rule-${i}-udp"
+         local rule_name_legacy="${CLUSTER_NAME}-ingress-v4-rule-${i}"
+         local fw_name="${FW_INGRESS_BASE}-v4-${i}"
+         
+         # 1. Get allocated IP Address
+         local ip_addr
+         ip_addr=$(gcloud compute addresses describe "${ip_name}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+         
+         if [ -z "$ip_addr" ]; then
+             warn "IP ${ip_name} not found! Skipping rule processing for index $i."
+             continue
+         fi
+         
+         if [ -n "$group_config" ]; then
+             log "Configuring Rules for IP $i ($ip_addr): Config=[$group_config]..."
+             
+             # Parse Ports
+             local tcp_ports=""
+             local udp_ports=""
+             
+             IFS=',' read -ra ITEMS <<< "$group_config"
+             for item in "${ITEMS[@]}"; do
+                 if [[ "$item" == */udp ]]; then
+                     local port=${item%/udp}
+                     udp_ports="${udp_ports},${port}"
+                 elif [[ "$item" == */tcp ]]; then
+                     local port=${item%/tcp}
+                     tcp_ports="${tcp_ports},${port}"
+                 else
+                     # Default: Both
+                     local port="$item"
+                     tcp_ports="${tcp_ports},${port}"
+                     udp_ports="${udp_ports},${port}"
+                 fi
+             done
+             
+             # Sanitization (sort, unique)
+             if [ -n "$tcp_ports" ]; then
+                 tcp_ports=$(echo "${tcp_ports//,/$'\n'}" | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
              fi
+             if [ -n "$udp_ports" ]; then
+                 udp_ports=$(echo "${udp_ports//,/$'\n'}" | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
+             fi
+
+             # --- TCP Rule ---
+             if [ -n "$tcp_ports" ]; then
+                 if ! gcloud compute forwarding-rules describe "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+                      run_safe gcloud compute forwarding-rules create "${rule_name_tcp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=TCP --ports="${tcp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_NAME}" --project="${PROJECT_ID}"
+                 else
+                      local current_ports
+                      current_ports=$(gcloud compute forwarding-rules describe "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" --format="value(ports)" | tr ';,' '\n' | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
+                      if [[ "$current_ports" != "$tcp_ports" ]]; then
+                          log "Updating TCP rule ${rule_name_tcp} ($current_ports -> $tcp_ports)..."
+                          run_safe gcloud compute forwarding-rules delete "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" -q
+                          run_safe gcloud compute forwarding-rules create "${rule_name_tcp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=TCP --ports="${tcp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_NAME}" --project="${PROJECT_ID}"
+                      fi
+                 fi
+             else
+                 # Cleanup if config has no TCP ports
+                  if gcloud compute forwarding-rules describe "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+                     run_safe gcloud compute forwarding-rules delete "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" -q
+                 fi
+             fi
+             
+             # --- UDP Rule ---
+             if [ -n "$udp_ports" ]; then
+                 if ! gcloud compute forwarding-rules describe "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+                      run_safe gcloud compute forwarding-rules create "${rule_name_udp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=UDP --ports="${udp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_UDP_NAME}" --project="${PROJECT_ID}"
+                 else
+                      local current_ports
+                      current_ports=$(gcloud compute forwarding-rules describe "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" --format="value(ports)" | tr ';,' '\n' | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
+                      if [[ "$current_ports" != "$udp_ports" ]]; then
+                          log "Updating UDP rule ${rule_name_udp} ($current_ports -> $udp_ports)..."
+                          run_safe gcloud compute forwarding-rules delete "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" -q
+                          run_safe gcloud compute forwarding-rules create "${rule_name_udp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=UDP --ports="${udp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_UDP_NAME}" --project="${PROJECT_ID}"
+                      fi
+                 fi
+             else
+                  if gcloud compute forwarding-rules describe "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+                     run_safe gcloud compute forwarding-rules delete "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" -q
+                 fi
+             fi
+             
+             # --- Firewall Rule ---
+             local allowed=""
+             if [ -n "$tcp_ports" ]; then allowed="tcp:${tcp_ports}"; fi
+             if [ -n "$udp_ports" ]; then 
+                if [ -n "$allowed" ]; then allowed="${allowed},"; fi
+                allowed="${allowed}udp:${udp_ports}"
+             fi
+             
+             if [ -n "$allowed" ]; then
+                 if ! gcloud compute firewall-rules describe "${fw_name}" --project="${PROJECT_ID}" &> /dev/null; then
+                     run_safe gcloud compute firewall-rules create "${fw_name}" --project="${PROJECT_ID}" --network="${VPC_NAME}" --direction=INGRESS --priority=1000 --action=ALLOW --rules="${allowed}" --source-ranges="0.0.0.0/0" --target-tags="talos-worker"
+                 else
+                     # Update existing rule, enforcing all properties to ensure consistency
+                     run_safe gcloud compute firewall-rules update "${fw_name}" --project="${PROJECT_ID}" --rules="${allowed}" --source-ranges="0.0.0.0/0" --target-tags="talos-worker"
+                 fi
+             else
+                  if gcloud compute firewall-rules describe "${fw_name}" --project="${PROJECT_ID}" &> /dev/null; then
+                     run_safe gcloud compute firewall-rules delete "${fw_name}" --project="${PROJECT_ID}" -q
+                 fi
+             fi
+
          else
-             # Cleanup if empty
+             # Config EMPTY/UNSET -> Ensure NO Rules exist for this IP
              if gcloud compute forwarding-rules describe "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-                 log "Removing unused TCP rule ${rule_name_tcp}..."
+                 log "Removing unused TCP rule ${rule_name_tcp} (No Config)..."
                  run_safe gcloud compute forwarding-rules delete "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" -q
              fi
-         fi
-         
-         # 4. Apply UDP Forwarding Rule
-         local rule_name_udp="${CLUSTER_NAME}-ingress-v4-rule-${idx}-udp"
-         if [ -n "$udp_ports" ]; then
-             if ! gcloud compute forwarding-rules describe "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-                  run_safe gcloud compute forwarding-rules create "${rule_name_udp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=UDP --ports="${udp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_UDP_NAME}" --project="${PROJECT_ID}"
-             else
-                  local current_ports
-                  # Get ports, sort numeric unique, join with comma
-                  current_ports=$(gcloud compute forwarding-rules describe "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" --format="value(ports)" | tr ';,' '\n' | sed '/^$/d' | sort -nu | tr '\n' ',' | sed 's/,$//')
-                  
-                  if [[ "$current_ports" == "$udp_ports" ]]; then
-                      log "UDP rule ${rule_name_udp} is up to date."
-                  else
-                      log "Updating UDP rule ${rule_name_udp} (Ports: $current_ports -> $udp_ports)..."
-                      run_safe gcloud compute forwarding-rules delete "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" -q
-                      run_safe gcloud compute forwarding-rules create "${rule_name_udp}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --ip-protocol=UDP --ports="${udp_ports}" --address="${ip_addr}" --backend-service="${BE_WORKER_UDP_NAME}" --project="${PROJECT_ID}"
-                  fi
-             fi
-         else
-             # Cleanup if empty
              if gcloud compute forwarding-rules describe "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-                 log "Removing unused UDP rule ${rule_name_udp}..."
+                 log "Removing unused UDP rule ${rule_name_udp} (No Config)..."
                  run_safe gcloud compute forwarding-rules delete "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" -q
              fi
-         fi
-         
-         # 5. Apply Firewall Rule (Combined)
-         local fw_name="${FW_INGRESS_BASE}-v4-${idx}"
-         local allowed=""
-         if [ -n "$tcp_ports" ]; then allowed="tcp:${tcp_ports//,/,tcp:}"; fi
-         if [ -n "$udp_ports" ]; then 
-            if [ -n "$allowed" ]; then allowed="${allowed},"; fi
-            allowed="${allowed}udp:${udp_ports//,/,udp:}"
-         fi
-
-         # Update or Create Firewall
-         if [ -n "$allowed" ]; then
-             if ! gcloud compute firewall-rules describe "${fw_name}" --project="${PROJECT_ID}" &> /dev/null; then
-                 run_safe gcloud compute firewall-rules create "${fw_name}" --project="${PROJECT_ID}" --network="${VPC_NAME}" --direction=INGRESS --priority=1000 --action=ALLOW --rules="${allowed}" --source-ranges="0.0.0.0/0" --target-tags="talos-worker"
-             else
-                 # Update existing rule to match config
-                 run_safe gcloud compute firewall-rules update "${fw_name}" --project="${PROJECT_ID}" --rules="${allowed}"
-             fi
-         else
-             # Cleanup if empty
              if gcloud compute firewall-rules describe "${fw_name}" --project="${PROJECT_ID}" &> /dev/null; then
-                 log "Removing unused Firewall rule ${fw_name}..."
+                 log "Removing unused Firewall rule ${fw_name} (No Config)..."
                  run_safe gcloud compute firewall-rules delete "${fw_name}" --project="${PROJECT_ID}" -q
              fi
          fi
          
-         
-         idx=$((idx+1))
+         # Always cleanup Legacy Rule if it exists
+         if gcloud compute forwarding-rules describe "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+             log "Removing legacy rule ${rule_name_legacy}..."
+             run_safe gcloud compute forwarding-rules delete "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" -q
+         fi
     done
-
-    # Cleanup Orphaned Groups (if config shrank)
-    # Check for higher indices and remove resources
+    
+    # --- PHASE 3: Prune Orphaned Rules (Indices >= Count) ---
+    local prune_start=$INGRESS_IP_COUNT
     while true; do
-        local ip_name="${CLUSTER_NAME}-ingress-v4-${idx}"
-        local rule_name_tcp="${CLUSTER_NAME}-ingress-v4-rule-${idx}-tcp"
-        local rule_name_udp="${CLUSTER_NAME}-ingress-v4-rule-${idx}-udp"
-        local rule_name_legacy="${CLUSTER_NAME}-ingress-v4-rule-${idx}"
-        local fw_name="${FW_INGRESS_BASE}-v4-${idx}"
+        local rule_name_tcp="${CLUSTER_NAME}-ingress-v4-rule-${prune_start}-tcp"
+        local rule_name_udp="${CLUSTER_NAME}-ingress-v4-rule-${prune_start}-udp"
+        local rule_name_legacy="${CLUSTER_NAME}-ingress-v4-rule-${prune_start}"
+        local fw_name="${FW_INGRESS_BASE}-v4-${prune_start}"
         
-        # Heuristic: Check if IP exists. If not, assume end of sequence.
-        # But safer to check ALL resources just in case.
         local found=false
         
         if gcloud compute forwarding-rules describe "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-             log "Removing orphaned TCP rule ${rule_name_tcp}..."
              run_safe gcloud compute forwarding-rules delete "${rule_name_tcp}" --region "${REGION}" --project="${PROJECT_ID}" -q
              found=true
         fi
-        if gcloud compute forwarding-rules describe "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-             log "Removing orphaned legacy rule ${rule_name_legacy}..."
-             run_safe gcloud compute forwarding-rules delete "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" -q
-             found=true
-        fi
         if gcloud compute forwarding-rules describe "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-             log "Removing orphaned UDP rule ${rule_name_udp}..."
              run_safe gcloud compute forwarding-rules delete "${rule_name_udp}" --region "${REGION}" --project="${PROJECT_ID}" -q
              found=true
         fi
-        if gcloud compute firewall-rules describe "${fw_name}" --project="${PROJECT_ID}" &> /dev/null; then
-             log "Removing orphaned Firewall rule ${fw_name}..."
-             run_safe gcloud compute firewall-rules delete "${fw_name}" --project="${PROJECT_ID}" -q
+        if gcloud compute forwarding-rules describe "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+             run_safe gcloud compute forwarding-rules delete "${rule_name_legacy}" --region "${REGION}" --project="${PROJECT_ID}" -q
              found=true
         fi
-        if gcloud compute addresses describe "${ip_name}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-             log "Removing orphaned IP address ${ip_name}..."
-             run_safe gcloud compute addresses delete "${ip_name}" --region "${REGION}" --project="${PROJECT_ID}" -q
+        if gcloud compute firewall-rules describe "${fw_name}" --project="${PROJECT_ID}" &> /dev/null; then
+             run_safe gcloud compute firewall-rules delete "${fw_name}" --project="${PROJECT_ID}" -q
              found=true
         fi
         
         if [ "$found" = false ]; then
             break
         fi
-        
-        idx=$((idx+1))
+        prune_start=$((prune_start+1))
     done
 }
