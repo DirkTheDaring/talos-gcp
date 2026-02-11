@@ -117,20 +117,33 @@ get_factory_url() {
     local schematic_id="$1"
     local version="$2"
     
+    # Validation check
+    if [ -z "$schematic_id" ]; then
+        error "Schematic ID is empty in get_factory_url."
+        return 1
+    fi
+
     # Factory URL for GCP raw disk
     local factory_url="https://factory.talos.dev/image/$schematic_id/$version/gcp-$ARCH.tar.gz"
     
     # Verify it exists (Factory generates on demand, but head check usually works or triggers generation)
-    if check_url "$factory_url"; then
-        echo "$factory_url"
-        return 0
-    else
-        # Factory might take a moment to register the schematic or generate the asset.
-        # However, if check_url fails, we shouldn't just return success with the URL.
-        # We will warn and return failure, letting the caller handle retry or exit.
-        warn "Factory URL not accessible yet: $factory_url"
-        return 1
-    fi
+    # Retry loop to allow Factory time to generate the asset
+    # Increased to 60 attempts x 10s = 10 minutes due to observed factory sluggishness
+    local max_retries=60
+    local wait_sec=10
+    
+    for ((i=1; i<=max_retries; i++)); do
+        if check_url "$factory_url"; then
+            echo "$factory_url"
+            return 0
+        fi
+        
+        warn "Factory URL not ready yet (Attempt $i/$max_retries). Waiting ${wait_sec}s..."
+        sleep "$wait_sec"
+    done
+
+    warn "Factory URL still not accessible after $((max_retries * wait_sec)) seconds: $factory_url"
+    return 1
 }
 
 ensure_single_image() {

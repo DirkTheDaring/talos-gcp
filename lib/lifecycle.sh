@@ -57,7 +57,7 @@ phase1_resources() {
     ensure_service_account
     
     # Ensure Images for both roles
-    ensure_role_images
+    ensure_role_images || return 1
     
     # Create output directory
     mkdir -p "${OUTPUT_DIR}"
