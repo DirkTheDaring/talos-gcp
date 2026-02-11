@@ -125,7 +125,8 @@ get_factory_url() {
     fi
 
     # Factory URL for GCP raw disk
-    local factory_url="https://factory.talos.dev/image/$schematic_id/$version/gcp-$ARCH.tar.gz"
+    # Note: Factory uses .raw.tar.gz for GCP images
+    local factory_url="https://factory.talos.dev/image/$schematic_id/$version/gcp-$ARCH.raw.tar.gz"
     
     # Verify it exists (Factory generates on demand, but head check usually works or triggers generation)
     # Retry loop to allow Factory time to generate the asset
@@ -195,6 +196,22 @@ ensure_single_image() {
     else
         installer_image="ghcr.io/siderolabs/installer:${version}"
         download_url=$(resolve_vanilla_image "$version")
+        
+        # Fallback to Factory for Vanilla if GitHub Release fails
+        if [ -z "$download_url" ]; then
+             warn "GitHub release artifact not found for ${version}. Trying Factory for Vanilla image..."
+             local schematic_id
+             # Pass empty string for extensions to get defaults
+             if schematic_id=$(get_schematic_id "$version" ""); then
+                 if ! download_url=$(get_factory_url "${schematic_id}" "${version}"); then
+                     error "Factory fallback failed."
+                     return 1
+                 fi
+                 # Update installer image to use Factory since GHCR might be missing too
+                 installer_image="factory.talos.dev/image/${schematic_id}/${version}/installer"
+                 log "Resolved Vanilla image via Factory (Schematic: ${schematic_id})"
+             fi
+        fi
     fi
     
     # Export variables
