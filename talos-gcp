@@ -92,6 +92,7 @@ source "${SCRIPT_DIR}/lib/bootstrap.sh"
 source "${SCRIPT_DIR}/lib/lifecycle.sh"
 source "${SCRIPT_DIR}/lib/ops.sh"
 source "${SCRIPT_DIR}/lib/traefik.sh"
+source "${SCRIPT_DIR}/lib/orphans.sh"
 source "${SCRIPT_DIR}/lib/help.sh"
 
 # Call immediately to set defaults for global scope
@@ -233,6 +234,15 @@ case "$COMMAND" in
         set_names
         check_dependencies
         update_traefik
+        ;;
+    orphans)
+        set_names
+        check_dependencies
+        if [[ "${2:-}" == "clean" ]] || [[ "${2:-}" == "cleanup" ]]; then
+             cleanup_orphans
+        else
+             list_orphans
+        fi
         ;;
     start)
         # check_dependencies - Not needed

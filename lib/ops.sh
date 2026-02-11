@@ -316,15 +316,15 @@ update_labels() {
     log "Retrieving versions from cluster..."
 
     # Check for kubeconfig
-    if ! (ssh_command "[ -f ./kubeconfig ]"); then
-        error "Kubeconfig not found on Bastion (~/kubeconfig). Cannot query cluster."
+    if ! (ssh_command "[ -f ~/.kube/config ]"); then
+        error "Kubeconfig not found on Bastion (~/.kube/config). Cannot query cluster."
         error "Try running 'verify-storage' or checking if the cluster is bootstrapped."
         return 1
     fi
     
     # 1. Kubernetes Version
     local K8S_VER_ACTUAL
-    K8S_VER_ACTUAL=$(ssh_command kubectl --kubeconfig ./kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')
+    K8S_VER_ACTUAL=$(ssh_command kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.nodeInfo.kubeletVersion}')
     
     if [ -z "$K8S_VER_ACTUAL" ]; then
         error "Failed to retrieve Kubernetes version. Is the cluster API reachable? Check 'verify-storage' or 'diagnose'."
@@ -333,7 +333,7 @@ update_labels() {
     
     # 2. Talos Version
     local TALOS_VER_ACTUAL
-    TALOS_VER_ACTUAL=$(ssh_command kubectl --kubeconfig ./kubeconfig get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.nodeInfo.osImage}')
+    TALOS_VER_ACTUAL=$(ssh_command kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.nodeInfo.osImage}')
     # Clean up: "Talos (v1.12.3)" -> "v1.12.3"
     TALOS_VER_ACTUAL=$(echo "$TALOS_VER_ACTUAL" | awk -F'[()]' '{print $2}')
     
@@ -344,7 +344,7 @@ update_labels() {
 
     # 3. Cilium Version
     local CILIUM_VER_ACTUAL
-    CILIUM_VER_ACTUAL=$(ssh_command kubectl --kubeconfig ./kubeconfig -n kube-system get deployment cilium-operator -o jsonpath='{.spec.template.spec.containers[0].image}')
+    CILIUM_VER_ACTUAL=$(ssh_command kubectl -n kube-system get deployment cilium-operator -o jsonpath='{.spec.template.spec.containers[0].image}')
     
     if [ -z "$CILIUM_VER_ACTUAL" ]; then
          warn "Cilium operator not found. Defaulting to configured version: ${CILIUM_VERSION}"
@@ -471,7 +471,7 @@ verify_storage() {
     
     # 1. Check StorageClasses
     log "Checking StorageClasses..."
-    if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get sc"; then
+    if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get sc"; then
         error "Failed to list StorageClasses. Is the cluster reachable?"
         return 1
     fi
@@ -511,13 +511,13 @@ spec:
 EOF
 
     run_safe gcloud compute scp "${OUTPUT_DIR}/storage-test.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig apply -f storage-test.yaml"
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl apply -f storage-test.yaml"
 
     # 3. Wait for Pod
     log "Waiting for Test Pod to be Ready (max 2m)..."
     local POD_STATUS=""
     for i in {1..24}; do
-        POD_STATUS=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get pod test-storage-pod -o jsonpath='{.status.phase}'" 2>/dev/null)
+        POD_STATUS=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get pod test-storage-pod -o jsonpath='{.status.phase}'" 2>/dev/null)
         if [ "$POD_STATUS" == "Running" ]; then
             log "Pod is Running!"
             break
@@ -530,13 +530,13 @@ EOF
     if [ "$POD_STATUS" != "Running" ]; then
         error "Pod failed to start. Status: $POD_STATUS"
         log "Investigating..."
-        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig describe pod test-storage-pod"
-        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig describe pvc test-pvc"
-        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get events --sort-by=.metadata.creationTimestamp | tail -n 20"
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl describe pod test-storage-pod"
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl describe pvc test-pvc"
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get events --sort-by=.metadata.creationTimestamp | tail -n 20"
     else
         # 4. Check Write
         log "Verifying data write..."
-        if gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig exec test-storage-pod -- cat /data/test-file" | grep -q "Hello Talos Storage"; then
+        if gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec test-storage-pod -- cat /data/test-file" | grep -q "Hello Talos Storage"; then
             log "SUCCESS: Data written and read from PVC."
         else
             error "FAILURE: Could not read data from PVC."
@@ -545,6 +545,6 @@ EOF
 
     # 5. Cleanup
     log "Cleaning up Test Resources..."
-    gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig delete -f storage-test.yaml --grace-period=0 --force"
+    gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl delete -f storage-test.yaml --grace-period=0 --force"
     rm -f "${OUTPUT_DIR}/storage-test.yaml"
 }
