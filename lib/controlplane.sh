@@ -137,6 +137,14 @@ def patch_file(filename, is_controlplane):
             if 'install' not in data['machine']: data['machine']['install'] = {}
             data['machine']['install']['image'] = install_image
 
+        # 7. Etcd Advertised Subnets (Fixes Peer URL Collision)
+        # Force etcd to use the GCP Subnet for peering, ensuring unique IPs are advertised.
+        if is_controlplane:
+            if 'cluster' not in data: data['cluster'] = {}
+            if 'etcd' not in data['cluster']: data['cluster']['etcd'] = {}
+            # advertisedSubnets is a list of CIDRs
+            data['cluster']['etcd']['advertisedSubnets'] = ["${SUBNET_RANGE}"]
+
 
     with open(filename, 'w') as f:
         yaml.safe_dump_all(docs, f)
