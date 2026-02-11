@@ -128,26 +128,36 @@ get_credentials() {
         exit 1
     fi
      
-    # Generate Tunnel-Friendly Kubeconfig (localhost)
-    # This allows users to use 'kubectl' via 'gcloud compute ssh ... -L 6443:IP:6443' without adding --server flag
-    cp "${OUTPUT_DIR}/kubeconfig" "${OUTPUT_DIR}/kubeconfig.local"
-    sed -i "s|https://${CP_ILB_IP}:6443|https://127.0.0.1:6443|g" "${OUTPUT_DIR}/kubeconfig.local"
-
+    # Generate Tunnel-Friendly Configs (localhost + safe ports)
+    # Ports match those in 'access-info': K8s=64430, Talos=50005
     
+    # Kubeconfig (64430)
+    cp "${OUTPUT_DIR}/kubeconfig" "${OUTPUT_DIR}/kubeconfig.local"
+    sed -i "s|https://${CP_ILB_IP}:6443|https://127.0.0.1:64430|g" "${OUTPUT_DIR}/kubeconfig.local"
+
+    # Talosconfig (50005)
+    cp "${OUTPUT_DIR}/talosconfig" "${OUTPUT_DIR}/talosconfig.local"
+    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig.local" config endpoint "https://127.0.0.1:50005"
+    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig.local" config node "127.0.0.1"
+
     echo ""
     log "Credentials saved to: ${OUTPUT_DIR}"
     echo "------------------------------------------------"
     echo "NOTE: Control Plane is INTERNAL (${CP_ILB_IP})."
     echo "Files:"
-    echo "  - ${OUTPUT_DIR}/kubeconfig        (Internal IP)"
-    echo "  - ${OUTPUT_DIR}/kubeconfig.local  (Localhost / Tunnel)"
+    echo "  - kubeconfig        (Internal IP)"
+    echo "  - talosconfig       (Internal IP)"
+    echo "  - kubeconfig.local  (Tunnel: 127.0.0.1:64430)"
+    echo "  - talosconfig.local (Tunnel: 127.0.0.1:50005)"
     echo ""
     echo "To access from your workstation:"
     echo "  1. Start Tunnel:"
-    echo "     gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap --project ${PROJECT_ID} -- -L 6443:${CP_ILB_IP}:6443 -N"
-    echo "  2. Use Local Config:"
+    echo "     ./talos-gcp access-info"
+    echo "  2. Use Configs:"
     echo "     export KUBECONFIG=${OUTPUT_DIR}/kubeconfig.local"
+    echo "     export TALOSCONFIG=${OUTPUT_DIR}/talosconfig.local"
     echo "     kubectl get nodes"
+    echo "     talosctl dashboard"
     echo "------------------------------------------------"
 }
 

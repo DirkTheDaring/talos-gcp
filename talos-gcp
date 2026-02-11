@@ -229,6 +229,12 @@ case "$COMMAND" in
         log "  -> Granting read access to bucket 'gs://${BUCKET_NAME}'..."
         run_safe gsutil iam ch "user:${EMAIL}:objectViewer" "gs://${BUCKET_NAME}"
 
+        # 4. Service Account User (Required for OS Login on VM with SA)
+        log "  -> Granting 'roles/iam.serviceAccountUser' on '${SA_EMAIL}'..."
+        run_safe gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+            --member="user:${EMAIL}" \
+            --role="roles/iam.serviceAccountUser" >/dev/null
+
         log "Admin access granted."
         ;;
 
@@ -258,11 +264,15 @@ case "$COMMAND" in
             
         # 3. GCS Bucket Access - Allow fetching credentials
         log "  -> Granting read access to bucket 'gs://${BUCKET_NAME}'..."
-        # Use gcloud storage for consistency, or gsutil iam ch
-        # gsutil is widely available in our dep check
         run_safe gsutil iam ch "user:${EMAIL}:objectViewer" "gs://${BUCKET_NAME}"
         
-        log "Developer access granted (SSH + IAP + GCS)."
+        # 4. Service Account User (Required for OS Login on VM with SA)
+        log "  -> Granting 'roles/iam.serviceAccountUser' on '${SA_EMAIL}'..."
+        run_safe gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+            --member="user:${EMAIL}" \
+            --role="roles/iam.serviceAccountUser" >/dev/null
+        
+        log "Developer access granted (SSH + IAP + GCS + SA User)."
         log "Ask the user to run:"
         log "  1. ./talos-gcp get-credentials"
         log "  2. ./talos-gcp access-info"
@@ -288,7 +298,7 @@ case "$COMMAND" in
             
         echo ""
         echo "=== [Tunnel] roles/iap.tunnelResourceAccessor ==="
-        gcloud projects get-iam-policy "${PROJECT_ID}" \
+        gcloud projects get-iam-iam-policy "${PROJECT_ID}" \
             --flatten="bindings[].members" \
             --filter="bindings.role:roles/iap.tunnelResourceAccessor" \
             --format="value(bindings.members)" || true
@@ -296,6 +306,13 @@ case "$COMMAND" in
         echo ""
         echo "=== [GCS] Storage Object Viewers (${BUCKET_NAME}) ==="
         gsutil iam get "gs://${BUCKET_NAME}" | grep "user:" || echo "No explicit user bindings found on bucket."
+        
+        echo ""
+        echo "=== [SA User] roles/iam.serviceAccountUser (${SA_EMAIL}) ==="
+        gcloud iam service-accounts get-iam-policy "${SA_EMAIL}" \
+            --flatten="bindings[].members" \
+            --filter="bindings.role:roles/iam.serviceAccountUser" \
+            --format="value(bindings.members)" || true
         ;;
         
     revoke-access)
@@ -348,6 +365,12 @@ case "$COMMAND" in
         else
              warn "Failed to remove bucket access (or not present)."
         fi
+        
+        # 4. Service Account User
+        log "  -> Removing 'roles/iam.serviceAccountUser' from '${SA_EMAIL}'..."
+        run_safe gcloud iam service-accounts remove-iam-policy-binding "${SA_EMAIL}" \
+            --member="user:${EMAIL}" \
+            --role="roles/iam.serviceAccountUser" >/dev/null || warn "Role not found or already removed."
         
         log "Access revoked."
         ;;
