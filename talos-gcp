@@ -203,209 +203,23 @@ case "$COMMAND" in
         ;;
 
     grant-admin)
-        set_names
-        check_dependencies || return 1
-        if [ -z "${2:-}" ]; then
-            error "Usage: ./talos-gcp grant-admin <email>"
-            error "Example: ./talos-gcp grant-admin user@example.com"
-            exit 1
-        fi
-        EMAIL="$2"
-        log "Granting Admin Access to '${EMAIL}'..."
-        
-        # 1. OS Admin Login (Root)
-        log "  -> Adding 'roles/compute.osAdminLogin' (Root Access)..."
-        run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-            --member="user:${EMAIL}" \
-            --role="roles/compute.osAdminLogin" >/dev/null
-
-        # 2. IAP Tunnel Access (Often implicitly held by project owners, but explicit is safer)
-        log "  -> Adding 'roles/iap.tunnelResourceAccessor' (Tunnel Access)..."
-        run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-            --member="user:${EMAIL}" \
-            --role="roles/iap.tunnelResourceAccessor" >/dev/null
-
-        # 3. GCS Bucket Access
-        log "  -> Granting read access to bucket 'gs://${BUCKET_NAME}'..."
-        run_safe gsutil iam ch "user:${EMAIL}:objectViewer" "gs://${BUCKET_NAME}"
-
-        # 4. Service Account User (Required for OS Login on VM with SA)
-        # Fetch actual SA from Bastion (it uses Default Compute SA usually)
-        log "  -> resolving Bastion Service Account..."
-        local ACTUAL_SA
-        ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
-        
-        if [ -n "${ACTUAL_SA}" ]; then
-            log "  -> Granting 'roles/iam.serviceAccountUser' on '${ACTUAL_SA}'..."
-            run_safe gcloud iam service-accounts add-iam-policy-binding "${ACTUAL_SA}" \
-                --member="user:${EMAIL}" \
-                --role="roles/iam.serviceAccountUser" >/dev/null
-        else
-            warn "Could not determine Bastion Service Account. Skipping 'serviceAccountUser' role."
-        fi
-
-        log "Admin access granted."
+        shift
+        cmd_grant_admin "$@"
         ;;
 
     grant-access)
-        set_names
-        check_dependencies || return 1
-        
-        if [ -z "${2:-}" ]; then
-            error "Usage: ./talos-gcp grant-access <email>"
-            error "Example: ./talos-gcp grant-access dev@example.com"
-            exit 1
-        fi
-        EMAIL="$2"
-        log "Granting Developer Access to '${EMAIL}'..."
-        
-        # 1. OS Login (Non-Admin) - Allows SSH Key management & Instance Get
-        log "  -> Adding 'roles/compute.osLogin' (Instance Access)..."
-        run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-            --member="user:${EMAIL}" \
-            --role="roles/compute.osLogin" >/dev/null
-
-        # 2. IAP Tunnel Access - Required for --tunnel-through-iap
-        log "  -> Adding 'roles/iap.tunnelResourceAccessor' (Tunnel Access)..."
-        run_safe gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
-            --member="user:${EMAIL}" \
-            --role="roles/iap.tunnelResourceAccessor" >/dev/null
-            
-        # 3. GCS Bucket Access - Allow fetching credentials
-        log "  -> Granting read access to bucket 'gs://${BUCKET_NAME}'..."
-        run_safe gsutil iam ch "user:${EMAIL}:objectViewer" "gs://${BUCKET_NAME}"
-        
-        # 4. Service Account User (Required for OS Login on VM with SA)
-        log "  -> resolving Bastion Service Account..."
-        local ACTUAL_SA
-        ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
-
-        if [ -n "${ACTUAL_SA}" ]; then
-            log "  -> Granting 'roles/iam.serviceAccountUser' on '${ACTUAL_SA}'..."
-            run_safe gcloud iam service-accounts add-iam-policy-binding "${ACTUAL_SA}" \
-                --member="user:${EMAIL}" \
-                --role="roles/iam.serviceAccountUser" >/dev/null
-             log "Developer access granted (SSH + IAP + GCS + SA User)."
-        else
-             warn "Could not determine Bastion Service Account. Skipping 'serviceAccountUser' role."
-             log "Developer access granted (SSH + IAP + GCS)."
-        fi
-        
-        log "Ask the user to run:"
-        log "  1. ./talos-gcp get-credentials"
-        log "  2. ./talos-gcp access-info"
+        shift
+        cmd_grant_access "$@"
         ;;
 
     list-access)
-        set_names
-        check_dependencies
-        log "Listing users by role..."
-        
-        echo "=== [Admin] roles/compute.osAdminLogin ==="
-        gcloud projects get-iam-policy "${PROJECT_ID}" \
-            --flatten="bindings[].members" \
-            --filter="bindings.role:roles/compute.osAdminLogin" \
-            --format="value(bindings.members)" || true
-
-        echo ""
-        echo "=== [Developer] roles/compute.osLogin ==="
-        gcloud projects get-iam-policy "${PROJECT_ID}" \
-            --flatten="bindings[].members" \
-            --filter="bindings.role:roles/compute.osLogin" \
-            --format="value(bindings.members)" || true
-            
-        echo ""
-        echo "=== [Tunnel] roles/iap.tunnelResourceAccessor ==="
-        gcloud projects get-iam-policy "${PROJECT_ID}" \
-            --flatten="bindings[].members" \
-            --filter="bindings.role:roles/iap.tunnelResourceAccessor" \
-            --format="value(bindings.members)" || true
-        
-        echo ""
-        echo "=== [GCS] Storage Object Viewers (${BUCKET_NAME}) ==="
-        gsutil iam get "gs://${BUCKET_NAME}" | grep "user:" || echo "No explicit user bindings found on bucket."
-        
-        echo ""
-        # Resolve SA for listing
-        local ACTUAL_SA
-        ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
-        if [ -n "${ACTUAL_SA}" ]; then
-            echo "=== [SA User] roles/iam.serviceAccountUser (${ACTUAL_SA}) ==="
-            gcloud iam service-accounts get-iam-policy "${ACTUAL_SA}" \
-                --flatten="bindings[].members" \
-                --filter="bindings.role:roles/iam.serviceAccountUser" \
-                --format="value(bindings.members)" || true
-        else
-            echo "=== [SA User] (Bastion SA not found) ==="
-        fi
+        shift
+        cmd_list_access "$@"
         ;;
         
     revoke-access)
-        set_names
-        check_dependencies || return 1
-        
-        if [ -z "${2:-}" ]; then
-            error "Usage: ./talos-gcp revoke-access <email>"
-            error "Example: ./talos-gcp revoke-access dev@example.com"
-            exit 1
-        fi
-        EMAIL="$2"
-        log "Revoking access for '${EMAIL}'..."
-        
-        # Check if user is an Admin first
-        if gcloud projects get-iam-policy "${PROJECT_ID}" \
-            --flatten="bindings[].members" \
-            --filter="bindings.role:roles/compute.osAdminLogin" \
-            --format="value(bindings.members)" | grep -q "user:${EMAIL}"; then
-            echo ""
-            echo -e "${RED}[WARNING] User '${EMAIL}' has Admin Access (roles/compute.osAdminLogin)!${NC}"
-            echo "Revoking developer roles will NOT fully remove their access."
-            echo "To remove Admin access, you must manually run:"
-            echo "  gcloud projects remove-iam-policy-binding ${PROJECT_ID} --member=user:${EMAIL} --role=roles/compute.osAdminLogin"
-            echo ""
-            echo -n "Continue checking/removing developer roles? [y/N] "
-            read -r response
-            if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-                log "Aborted."
-                exit 0
-            fi
-        fi
-
-        # 1. OS Login (Non-Admin)
-        log "  -> Removing 'roles/compute.osLogin'..."
-        run_safe gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-            --member="user:${EMAIL}" \
-            --role="roles/compute.osLogin" >/dev/null || warn "Role not found or already removed."
-
-        # 2. IAP Tunnel Access
-        log "  -> Removing 'roles/iap.tunnelResourceAccessor'..."
-        run_safe gcloud projects remove-iam-policy-binding "${PROJECT_ID}" \
-            --member="user:${EMAIL}" \
-            --role="roles/iap.tunnelResourceAccessor" >/dev/null || warn "Role not found or already removed."
-
-        # 3. GCS Bucket Access
-        log "  -> Removing read access from bucket 'gs://${BUCKET_NAME}'..."
-        if gsutil iam ch -d "user:${EMAIL}:objectViewer" "gs://${BUCKET_NAME}"; then
-             :
-        else
-             warn "Failed to remove bucket access (or not present)."
-        fi
-        
-        # 4. Service Account User
-        log "  -> resolving Bastion Service Account..."
-        local ACTUAL_SA
-        ACTUAL_SA=$(gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --format="value(serviceAccounts[0].email)" --project="${PROJECT_ID}" 2>/dev/null)
-
-        if [ -n "${ACTUAL_SA}" ]; then
-            log "  -> Removing 'roles/iam.serviceAccountUser' from '${ACTUAL_SA}'..."
-            run_safe gcloud iam service-accounts remove-iam-policy-binding "${ACTUAL_SA}" \
-                --member="user:${EMAIL}" \
-                --role="roles/iam.serviceAccountUser" >/dev/null || warn "Role not found or already removed."
-        else
-            warn "Could not determine Bastion Service Account. Skipping 'serviceAccountUser' cleanup."
-        fi
-        
-        log "Access revoked."
+        shift
+        cmd_revoke_access "$@"
         ;;
 
     list-admins)
