@@ -135,3 +135,36 @@ The deployment script's `apply` command is **idempotent**, meaning it converges 
 
 This design allows you to manage the cluster size declaratively by simply updating the `WORKER_COUNT` variable.
 
+## 9. Orphan Management
+
+Over time, cloud environments can accumulate "orphaned" resources—items that are no longer attached to any active cluster but still incur costs. The `talos-gcp` CLI includes a built-in tool to detect and clean up these leftovers.
+
+**Scope:** This command scans the **Entire GCP Project**, not just the current cluster. This is intentional, as orphans often persist after a cluster mechanism has failed or been deleted.
+
+### Detect Orphans
+To list all potential orphans without making any changes:
+
+```bash
+./talos-gcp orphans
+# or
+./talos-gcp orphans list
+```
+
+**Scanned Resources:**
+*   **Unattached Disks**: Persistent Disks with no attached instances.
+*   **Unused Static IPs**: Reserved IP addresses not bound to any forwarding rule.
+*   **Dangling Images**: `talos-*` images that are not the boot disk for any running instance.
+*   **Zombie Load Balancers**: Forwarding Rules pointing to empty or non-existent target pools.
+
+### Cleanup Orphans
+To interactively clean up resources:
+
+```bash
+./talos-gcp orphans clean
+```
+
+**Safety Features:**
+1.  **Selection**: You must explicitly select resources by ID (e.g., `1,3,5`).
+2.  **Confirmation**: A final `[y/N]` prompt is required for each deletion.
+3.  **Recent Detach Protection**: If you try to delete a disk that was detached **less than 1 hour ago**, the tool will warn you and require a secondary confirmation. This prevents accidental deletion of disks during maintenance or reboots.
+

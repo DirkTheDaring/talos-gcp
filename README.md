@@ -117,6 +117,11 @@ export CLUSTER_NAME="dev-cluster"
 ./talos-gcp diagnose
 ```
 
+**Clean Up Orphans:**
+```bash
+./talos-gcp orphans
+```
+
 ### 3. Verification & Access
 Once deployed, the script generates `talosconfig` and `kubeconfig` in `_out/${CLUSTER_NAME}/`.
 Secure access is available via IAP Tunneling (see [docs/secure-access.md](docs/secure-access.md)).
