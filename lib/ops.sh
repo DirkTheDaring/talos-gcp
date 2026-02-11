@@ -116,8 +116,9 @@ get_credentials() {
     # Note: 'gen config' creates talosconfig, controlplane.yaml, worker.yaml
     run_safe talosctl gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${OUTPUT_DIR}/secrets.yaml" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
 
-    # Configure talosconfig endpoint
+    # Configure talosconfig endpoint AND node
     run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" config endpoint "https://${CP_ILB_IP}:6443"
+    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" config node "${CP_ILB_IP}"
     
     # 5. Fetch Kubeconfig from Bastion
     # We cannot run 'talosctl ... kubeconfig' locally because the API is internal.

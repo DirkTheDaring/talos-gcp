@@ -102,6 +102,7 @@ set_names() {
     FW_INTERNAL="${CLUSTER_NAME}-internal"
     FW_HEALTH="${CLUSTER_NAME}-healthcheck"
     FW_INGRESS_BASE="${CLUSTER_NAME}-ingress"
+    FW_BASTION_INTERNAL="${CLUSTER_NAME}-bastion-internal"
     
     # Load Balancer Resources
     HC_CP_NAME="${CLUSTER_NAME}-cp-hc"

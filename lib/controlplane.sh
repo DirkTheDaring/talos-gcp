@@ -18,7 +18,7 @@ phase2_controlplane() {
     # 2. Internal Load Balancer
     # Health Check
     if ! gcloud compute health-checks describe "${HC_CP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute health-checks create tcp "${HC_CP_NAME}" --region "${REGION}" --port 6443 --project="${PROJECT_ID}"
+        run_safe gcloud compute health-checks create tcp "${HC_CP_NAME}" --region "${REGION}" --port 50000 --project="${PROJECT_ID}"
     fi
     # Backend Service
     if ! gcloud compute backend-services describe "${BE_CP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
@@ -35,7 +35,7 @@ phase2_controlplane() {
     
     # Forwarding Rule
     if ! gcloud compute forwarding-rules describe "${ILB_CP_RULE}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute forwarding-rules create "${ILB_CP_RULE}" --region "${REGION}" --load-balancing-scheme=INTERNAL --ports=6443 --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" --address="${ILB_CP_IP_NAME}" --backend-service="${BE_CP_NAME}" --project="${PROJECT_ID}"
+        run_safe gcloud compute forwarding-rules create "${ILB_CP_RULE}" --region "${REGION}" --load-balancing-scheme=INTERNAL --ports=6443,50000,50001 --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" --address="${ILB_CP_IP_NAME}" --backend-service="${BE_CP_NAME}" --project="${PROJECT_ID}"
     fi
 
     # 3. Generate Secrets & Configs

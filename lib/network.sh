@@ -72,8 +72,23 @@ phase2_networking() {
             --allow=tcp:22 \
             --source-ranges=35.235.240.0/20 \
             --target-tags=bastion \
+            --target-tags=bastion \
             --project="${PROJECT_ID}"
     fi
+
+    # Allow Bastion -> Cluster (API & Talos)
+    # Explicit rule to ensure Bastion can talk to CP/Workers even if Internal rule is flaky
+    if gcloud compute firewall-rules describe "${FW_BASTION_INTERNAL}" --project="${PROJECT_ID}" &>/dev/null; then
+        log "Firewall Rule '${FW_BASTION_INTERNAL}' exists."
+    else
+        log "Creating Bastion->Cluster Firewall Rule..."
+        run_safe gcloud compute firewall-rules create "${FW_BASTION_INTERNAL}" \
+            --network="${VPC_NAME}" \
+            --allow=tcp:6443,tcp:50000,tcp:50001 \
+            --source-tags=bastion \
+            --project="${PROJECT_ID}"
+    fi
+
 
     # Allow Health Checks
     if gcloud compute firewall-rules describe "${FW_HEALTH}" --project="${PROJECT_ID}" &>/dev/null; then
@@ -169,7 +184,6 @@ apply_ingress() {
     for (( i=0; i<INGRESS_IP_COUNT; i++ )); do
          local group_config="${CONFIG_ADDR[$i]:-}" # Get config for this index, default empty
          
-         local ip_name="${CLUSTER_NAME}-ingress-v4-${i}"
          local rule_name_tcp="${CLUSTER_NAME}-ingress-v4-rule-${i}-tcp"
          local rule_name_udp="${CLUSTER_NAME}-ingress-v4-rule-${i}-udp"
          local rule_name_legacy="${CLUSTER_NAME}-ingress-v4-rule-${i}"

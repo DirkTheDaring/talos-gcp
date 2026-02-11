@@ -227,7 +227,7 @@ EOF
     # Run kubectl on Bastion with Retry for Secret Creation
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
         for i in {1..20}; do
-            echo 'Attempting to create gcp-service-account secret (Attempt \$i/20)...'
+            echo \"Attempting to create gcp-service-account secret (Attempt \$i/20)...\"
             # Use structured kubeconfig path
             if ! kubectl --kubeconfig ~/.kube/config get secret -n kube-system gcp-service-account &>/dev/null; then
                     if kubectl --kubeconfig ~/.kube/config create secret generic gcp-service-account --from-file=key.json=service-account.json -n kube-system; then

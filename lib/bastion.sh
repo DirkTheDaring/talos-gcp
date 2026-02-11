@@ -191,6 +191,14 @@ EOF
 
 phase4_bastion() {
     log "Phase 4: Setting up Bastion..."
+    
+    # Retrieve Control Plane IP for config (Needed for talosctl config node)
+    local CP_ILB_IP
+    CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null)
+    if [ -z "$CP_ILB_IP" ]; then
+        warn "Could not retrieve Control Plane IP. talosconfig on bastion might need manual update."
+    fi
+
     log "Waiting for Bastion SSH to become available (vm booting + sshd start, max 5m)..."
     # Increase timeout to 5 minutes (60 * 5s)
     local MAX_RETRIES=60
@@ -219,8 +227,10 @@ phase4_bastion() {
     # 1. talosconfig
     if [ -f "${OUTPUT_DIR}/talosconfig" ]; then
         run_safe retry gcloud compute scp "${OUTPUT_DIR}/talosconfig" "${BASTION_NAME}:~/.talos/config" --zone "${ZONE}" --tunnel-through-iap
-        # Merge if needed, but for now just overwrite main config
-        # run_safe gcloud compute ssh "${BASTION_NAME}" ... "talosctl config merge ..."
+        # Ensure the bastion config points to the VIP (for stability)
+        if [ -n "${CP_ILB_IP}" ]; then
+            run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "talosctl --talosconfig ~/.talos/config config node ${CP_ILB_IP} && talosctl --talosconfig ~/.talos/config config endpoint ${CP_ILB_IP}"
+        fi
     else
         warn "Local talosconfig not found. Bastion cannot manage Talos nodes."
     fi
