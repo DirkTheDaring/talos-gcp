@@ -7,6 +7,9 @@ Usage: ${GREEN}./talos-gcp${NC} [OPTIONS] <COMMAND>
 
 ${YELLOW}Commands:${NC}
   ${GREEN}create${NC}             Full cluster deployment (Phases 1-5).
+  ${GREEN}orphans [clean]${NC}    List or clean up orphaned resources (disks/IPs).
+  ${GREEN}access-info${NC}        Generate developer access instructions (Tunnel).
+  ${GREEN}start${NC}              Start all Talos nodes.
   ${GREEN}destroy${NC}            Destroy all cluster resources (Instances, Networking, etc.).
   ${GREEN}apply${NC}              Apply changes to worker count (Scale up/down).
   ${GREEN}stop${NC}               Stop all control plane and worker nodes.
@@ -52,7 +55,6 @@ ${YELLOW}Examples:${NC}
   # Load a specific config file
   ./talos-gcp -c my-cluster.env status
 EOF
-    exit 0
     exit 0
 }
 

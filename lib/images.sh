@@ -78,8 +78,8 @@ get_schematic_id() {
     
     # Construct JSON payload for Factory
     local ext_json
-    # Split by comma and filter empty strings
-    ext_json=$(echo "$extensions" | jq -R 'split(",") | map(select(length > 0))')
+    # Split by comma, trim whitespace, and filter empty strings
+    ext_json=$(echo "$extensions" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | sort')
     
     local payload
     payload=$(jq -n --arg ver "$version" --argjson ext "$ext_json" \
@@ -166,8 +166,13 @@ ensure_single_image() {
     if [ -z "$extensions" ]; then
         suffix="gcp-${ARCH}"
     else
+        # Deterministic hashing: Sort extensions to avoid 'a,b' vs 'b,a' diffs
+        # Trim whitespace and remove empty entries to match jq logic
+        local normalized_ext
+        normalized_ext=$(echo "${extensions}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort | tr '\n' ',' | sed 's/,$//')
+        
         local ext_hash
-        ext_hash=$(echo "${extensions}" | md5sum | cut -c1-8)
+        ext_hash=$(echo "${normalized_ext}" | md5sum | cut -c1-8)
         suffix="${role}-${ext_hash}-${ARCH}"
     fi
     

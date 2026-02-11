@@ -7,6 +7,7 @@ phase2_bastion() {
         cat <<EOF > "${OUTPUT_DIR}/bastion_startup.sh"
 #! /bin/bash
 set -ex
+set -o pipefail
 
 # Retry wrapper
 retry() {
@@ -39,7 +40,7 @@ chmod +x kubectl
 mv kubectl /usr/local/bin/
 
 # Install Helm
-retry curl -L https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+retry curl -f -L https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
 # Install Cilium CLI
 CILIUM_CLI_VERSION=\$(curl -sL https://raw.githubusercontent.com/cilium/cilium-cli/master/stable.txt)

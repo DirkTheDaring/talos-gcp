@@ -14,9 +14,10 @@ deploy_cilium() {
     fi
 
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
+        set -o pipefail
         if ! command -v helm &>/dev/null; then
             echo 'Helm not found. Installing...'
-            curl -sL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+            curl -f -sL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
         else
             echo 'Helm is already installed.'
         fi
@@ -156,6 +157,7 @@ EOF
     cat <<EOF > "${OUTPUT_DIR}/install_cilium.sh"
 #!/bin/bash
 set -e
+set -o pipefail
 export KUBECONFIG=~/.kube/config
 
 # Install/Upgrade Cilium
