@@ -33,6 +33,8 @@ SUBNET_NAME="${SUBNET_NAME:-${CLUSTER_NAME}-subnet}"
 SUBNET_RANGE="${SUBNET_RANGE:-10.0.0.0/24}"
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
+# Storage CIDR (Multi-NIC) - Default Empty (Opt-in)
+STORAGE_CIDR="${STORAGE_CIDR:-}"
 
 # Compute
 CP_MACHINE_TYPE="${CP_MACHINE_TYPE:-e2-standard-2}"
@@ -88,6 +90,14 @@ set_names() {
     SUBNET_NAME="${CLUSTER_NAME}-subnet"
     ROUTER_NAME="${CLUSTER_NAME}-router"
     NAT_NAME="${CLUSTER_NAME}-nat"
+    
+    # Storage Network (Multi-NIC)
+    # Only set if STORAGE_CIDR is active
+    if [ -n "${STORAGE_CIDR:-}" ]; then
+        VPC_STORAGE_NAME="${CLUSTER_NAME}-storage-vpc"
+        SUBNET_STORAGE_NAME="${CLUSTER_NAME}-storage-subnet"
+        FW_STORAGE_INTERNAL="${CLUSTER_NAME}-storage-internal"
+    fi
     
     # Instance Group
     IG_CP_NAME="${CLUSTER_NAME}-ig-cp"

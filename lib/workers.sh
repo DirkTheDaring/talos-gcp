@@ -46,13 +46,24 @@ create_worker_instance() {
     fi
 
     # Workaround: gcloud filter hangs.
+    # Prepare Network Interface Flags
+    local -a NETWORK_FLAGS
+    # NIC0: Primary (Cluster Network)
+    # MUST use --network-interface if mixing with --network-interface for nic1
+    NETWORK_FLAGS=("--network-interface" "network=${VPC_NAME},subnet=${SUBNET_NAME},no-address")
+    
+    # NIC1: Storage Network (Optional)
+    if [ -n "${STORAGE_CIDR:-}" ]; then
+            NETWORK_FLAGS+=("--network-interface" "network=${VPC_STORAGE_NAME},subnet=${SUBNET_STORAGE_NAME},no-address")
+    fi
+
     if ! gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${worker_name}$"; then
          log "Creating worker node (${worker_name})..."
          run_safe retry gcloud compute instances create "${worker_name}" \
             --image "${WORKER_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \
             --machine-type="${WORKER_MACHINE_TYPE}" --boot-disk-size="${WORKER_DISK_SIZE}" \
-            --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" \
-            --no-address --service-account="${WORKER_SERVICE_ACCOUNT}" --scopes cloud-platform \
+            "${NETWORK_FLAGS[@]}" \
+            --service-account="${WORKER_SERVICE_ACCOUNT}" --scopes cloud-platform \
             --tags "talos-worker,${worker_name}" \
             --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${WORKER_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
             --metadata-from-file=user-data="${OUTPUT_DIR}/worker.yaml" \

@@ -145,6 +145,24 @@ def patch_file(filename, is_controlplane):
             # advertisedSubnets is a list of CIDRs
             data['cluster']['etcd']['advertisedSubnets'] = ["${SUBNET_RANGE}"]
 
+        # 8. Multi-NIC Routing (Storage Network)
+        storage_cidr = "${STORAGE_CIDR}"
+        if storage_cidr:
+             if 'machine' not in data: data['machine'] = {}
+             if 'network' not in data['machine']: data['machine']['network'] = {}
+             if 'interfaces' not in data['machine']['network']: data['machine']['network']['interfaces'] = []
+             
+             interfaces = data['machine']['network']['interfaces']
+             # Find or Create nic1 (busPath 1*)
+             nic1 = next((i for i in interfaces if i.get('deviceSelector', {}).get('busPath') == '1*'), None)
+             
+             if not nic1:
+                 nic1 = {'deviceSelector': {'busPath': '1*'}}
+                 interfaces.append(nic1)
+                 
+             nic1['dhcp'] = True
+             nic1['ignoreDefaultRoute'] = True
+
 
     with open(filename, 'w') as f:
         yaml.safe_dump_all(docs, f)
@@ -159,13 +177,24 @@ PYEOF
     for ((i=0; i<${CP_COUNT}; i++)); do
         local cp_name="${CLUSTER_NAME}-cp-$i"
         # Workaround: gcloud filter hangs on checking non-existent instances. List all and grep locally.
+        # Prepare Network Interface Flags
+        local -a NETWORK_FLAGS
+        # NIC0: Primary (Cluster Network)
+        # MUST use --network-interface if mixing with --network-interface for nic1
+        NETWORK_FLAGS=("--network-interface" "network=${VPC_NAME},subnet=${SUBNET_NAME},no-address")
+        
+        # NIC1: Storage Network (Optional)
+        if [ -n "${STORAGE_CIDR:-}" ]; then
+             NETWORK_FLAGS+=("--network-interface" "network=${VPC_STORAGE_NAME},subnet=${SUBNET_STORAGE_NAME},no-address")
+        fi
+
         if ! gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${cp_name}$"; then
             log "Creating control plane node $i (${cp_name})..."
             run_safe retry gcloud compute instances create "${cp_name}" \
                 --image "${CP_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \
                 --machine-type="${CP_MACHINE_TYPE}" --boot-disk-size="${CP_DISK_SIZE}" \
-                --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" \
-                --tags "talos-controlplane,${cp_name}" --no-address \
+                "${NETWORK_FLAGS[@]}" \
+                --tags "talos-controlplane,${cp_name}" \
                 --service-account="${CP_SERVICE_ACCOUNT}" --scopes cloud-platform \
                 --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${CP_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
                 --metadata-from-file=user-data="${OUTPUT_DIR}/controlplane.yaml"

@@ -1,7 +1,45 @@
 #!/bin/bash
 
+# CIDR Validation Helper
+validate_cidrs() {
+    # If STORAGE_CIDR is not set, nothing to validate
+    if [ -z "${STORAGE_CIDR:-}" ]; then
+        return 0
+    fi
+
+    log "Validating CIDR ranges..."
+    
+    # Use Python for reliable CIDR overlap checking
+    python3 -c "
+import ipaddress
+import sys
+
+def check_overlap(name1, cidr1, name2, cidr2):
+    try:
+        n1 = ipaddress.ip_network(cidr1)
+        n2 = ipaddress.ip_network(cidr2)
+        if n1.overlaps(n2):
+            print(f'ERROR: {name1} ({cidr1}) overlaps with {name2} ({cidr2})')
+            sys.exit(1)
+    except ValueError as e:
+        print(f'ERROR: Invalid CIDR format: {e}')
+        sys.exit(1)
+
+storage = '${STORAGE_CIDR}'
+check_overlap('STORAGE_CIDR', storage, 'SUBNET_RANGE', '${SUBNET_RANGE}')
+check_overlap('STORAGE_CIDR', storage, 'POD_CIDR', '${POD_CIDR}')
+check_overlap('STORAGE_CIDR', storage, 'SERVICE_CIDR', '${SERVICE_CIDR}')
+"
+    if [ $? -ne 0 ]; then
+        error "CIDR validation failed."
+        exit 1
+    fi
+}
+
 phase2_networking() {
     log "Phase 2a: Network Infrastructure..."
+    
+    validate_cidrs
 
     # 1. VPC
     if gcloud compute networks describe "${VPC_NAME}" --project="${PROJECT_ID}" &>/dev/null; then
@@ -100,6 +138,46 @@ phase2_networking() {
             --allow=tcp:6443,tcp:50000,tcp:50001 \
             --source-ranges=35.191.0.0/16,130.211.0.0/22 \
             --project="${PROJECT_ID}"
+    fi
+
+
+    # 6. Storage Network (Multi-NIC)
+    if [ -n "${STORAGE_CIDR:-}" ]; then
+        log "Multi-NIC: configuring Storage Network..."
+        
+        # Storage VPC
+        if gcloud compute networks describe "${VPC_STORAGE_NAME}" --project="${PROJECT_ID}" &>/dev/null; then
+            log "Storage VPC '${VPC_STORAGE_NAME}' exists."
+        else
+            log "Creating Storage VPC '${VPC_STORAGE_NAME}'..."
+            run_safe gcloud compute networks create "${VPC_STORAGE_NAME}" \
+                --subnet-mode=custom \
+                --project="${PROJECT_ID}"
+        fi
+
+        # Storage Subnet
+        if gcloud compute networks subnets describe "${SUBNET_STORAGE_NAME}" --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+            log "Storage Subnet '${SUBNET_STORAGE_NAME}' exists."
+        else
+            log "Creating Storage Subnet '${SUBNET_STORAGE_NAME}'..."
+            run_safe gcloud compute networks subnets create "${SUBNET_STORAGE_NAME}" \
+                --network="${VPC_STORAGE_NAME}" \
+                --range="${STORAGE_CIDR}" \
+                --region="${REGION}" \
+                --project="${PROJECT_ID}"
+        fi
+
+        # Storage Firewall (Allow Internal)
+        if gcloud compute firewall-rules describe "${FW_STORAGE_INTERNAL}" --project="${PROJECT_ID}" &>/dev/null; then
+            log "Storage Firewall '${FW_STORAGE_INTERNAL}' exists."
+        else
+            log "Creating Storage Firewall Rule..."
+            run_safe gcloud compute firewall-rules create "${FW_STORAGE_INTERNAL}" \
+                --network="${VPC_STORAGE_NAME}" \
+                --allow=tcp,udp,icmp \
+                --source-ranges="${STORAGE_CIDR}" \
+                --project="${PROJECT_ID}"
+        fi
     fi
 }
 
