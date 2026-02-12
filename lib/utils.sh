@@ -226,7 +226,7 @@ ensure_service_account() {
 
 check_apis() {
     log "Checking API Enablement..."
-    local REQUIRED_APIS=("compute.googleapis.com" "iam.googleapis.com" "cloudresourcemanager.googleapis.com" "storage.googleapis.com")
+    local REQUIRED_APIS=("compute.googleapis.com" "iam.googleapis.com" "cloudresourcemanager.googleapis.com" "storage.googleapis.com" "networkmanagement.googleapis.com" "iap.googleapis.com" "serviceusage.googleapis.com")
     local MISSING_APIS=()
     
     # We check list of enabled services

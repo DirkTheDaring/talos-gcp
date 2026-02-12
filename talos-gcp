@@ -264,6 +264,12 @@ case "$COMMAND" in
         # check_dependencies - Not needed
         access_info
         ;;
+    verify-access)
+        set_names
+        check_dependencies
+        shift
+        verify_access "$@"
+        ;;
     start)
         # check_dependencies - Not needed
         start_nodes

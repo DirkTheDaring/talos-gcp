@@ -114,11 +114,13 @@ cleanup() {
     echo -e "  Zone:    ${ZONE}"
     echo -e "  Cluster: ${CLUSTER_NAME}"
     echo -e "This will delete instances, disks, networks, IGs, LBs, and IAM bindings."
-    echo -n "Are you sure you want to proceed? [y/N] "
-    read -r response
-    if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-        log "Cleanup aborted."
-        exit 0
+    if [ "${CONFIRM_CHANGES:-true}" != "false" ]; then
+        echo -n "Are you sure you want to proceed? [y/N] "
+        read -r response
+        if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+            log "Cleanup aborted."
+            exit 0
+        fi
     fi
 
     log "Cleaning up resources for cluster: ${CLUSTER_NAME}..."
