@@ -393,7 +393,7 @@ def patch_manifests(input_file, output_file):
                 if 'volumeMounts' in c:
                     c['volumeMounts'] = [vm for vm in c['volumeMounts'] if vm['name'] not in ['udev-rules-etc', 'udev-rules-lib', 'udev-socket']]
             
-            # Patch Duplicate Port Names (Pod-wide uniqueness)
+            # Patch Duplicate and Long Port Names
             seen_port_names = set()
             for c in containers:
                 if 'ports' in c:
@@ -401,10 +401,20 @@ def patch_manifests(input_file, output_file):
                     for p in c['ports']:
                         p_name = p.get('name')
                         if p_name:
+                            # Fix: Truncate long port names (max 15 chars)
+                            if p_name == "http-endpoint-csi-attacher":
+                                p_name = "http-csi-attach"
+                            elif p_name == "http-endpoint-csi-resizer":
+                                p_name = "http-csi-resize"
+                            elif p_name == "http-endpoint-csi-snapshotter":
+                                p_name = "http-csi-snap"
+                                
+                            # Handle duplicates
                             if p_name in seen_port_names:
-                                # Rename duplicate port to avoid warning/conflict
-                                p['name'] = f"{p_name}-{c['name']}"
-                            seen_port_names.add(p['name'])
+                                p_name = f"{p_name}-{c['name']}"[:15] # Ensure uniqueness but keep it short
+                            
+                            p['name'] = p_name
+                            seen_port_names.add(p_name)
                         new_ports.append(p)
                     c['ports'] = new_ports
             
