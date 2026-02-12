@@ -290,27 +290,89 @@ ssh_command() {
 
 status() {
     set_names
-    echo ""
-    log "Cluster Status: ${CLUSTER_NAME}"
-    echo "--------------------------------------------------"
-    log "Control Plane (Internal LB):"
-    gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" --format="value(address)" 2>/dev/null || echo "  (Not found)"
     
-    echo ""
-    log "Ingress IPs (Worker Load Balancers):"
-    gcloud compute addresses list --filter="name~'${CLUSTER_NAME}-ingress.*'" --format="table[box](name, address, region)" --project="${PROJECT_ID}"
+    # Check for required tools
+    for cmd in jq; do
+        if ! command -v "$cmd" &> /dev/null; then
+            error "Command '$cmd' is required for status but not installed."
+            return 1
+        fi
+    done
+
+    # 1. Fetch Instance Data
+    # Get name, status, lastStartTimestamp, lastStopTimestamp for all instances in the cluster
+    local INSTANCE_DATA
+    # Use || echo "[]" to prevent set -e from killing the script if gcloud returns non-zero (e.g. no instances found with specific filter warning)
+    INSTANCE_DATA=$(gcloud compute instances list \
+        --filter="labels.cluster=${CLUSTER_NAME}" \
+        --project="${PROJECT_ID}" \
+        --format="json(name, status, lastStartTimestamp, lastStopTimestamp)" 2>/dev/null || echo "[]")
     
-    echo ""
-    log "Bastion Access:"
-    echo "  gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap"
+    if [ -z "$INSTANCE_DATA" ] || [ "$INSTANCE_DATA" == "[]" ]; then
+        warn "No instances found for cluster '${CLUSTER_NAME}'."
+        return
+    fi
     
+    # 2. Process Data using jq
+    # Logic:
+    # - Aggregated Status:
+    #   - If ANY instance is RUNNING -> "Online" (Operational)
+    #   - If ALL instances are TERMINATED/STOPPED -> "Offline"
+    #   - Otherwise -> "Transitioning" (Provisioning, Stopping, etc.)
+    # - Timestamps:
+    #   - Started At: Max(lastStartTimestamp) of RUNNING instances (when the last node came up)
+    #   - Stopped At: Max(lastStopTimestamp) of STOPPED instances (when the last node went down)
+    
+    # We output a TSV line: CLUSTER_NAME  STATUS  STARTED_AT  STOPPED_AT
+    
+    local RESULT
+    RESULT=$(echo "$INSTANCE_DATA" | jq -r --arg cluster "$CLUSTER_NAME" '
+        # Calculate counts
+        length as $total |
+        map(select(.status == "RUNNING")) | length as $running |
+        ($total - $running) as $not_running |
+        
+        # Determine Overall Status
+        (if $running == $total and $total > 0 then "Online"
+         elif $running > 0 then "Degraded"
+         elif $total > 0 then "Offline"
+         else "Unknown" end) as $status |
+         
+        # Find latest Start Time (from currently RUNNING nodes)
+        (map(select(.status == "RUNNING" and .lastStartTimestamp != null).lastStartTimestamp) | sort | last) as $started |
+        
+        # Find latest Stop Time (from currently STOPPED nodes)
+        (try (map(select(.status != "RUNNING" and .lastStopTimestamp != null).lastStopTimestamp) | sort | last) catch null) as $stopped |
+        
+        # Format Timestamps (Simple ISO to readable if possible, or keep as is)
+        def fmt(ts): if ts then (ts | split(".")[0] | sub("T"; " ")) else "-" end;
+
+        [$cluster, $status, fmt($started), fmt($stopped)] | @tsv
+    ')
+    
+    # 3. Display Table
+    # Header
+    printf "%-30s %-10s %-25s %-25s\n" "CLUSTER" "STATUS" "STARTED AT" "STOPPED AT"
+    
+    IFS=$'\t' read -r CLUSTER STAT START STOP <<< "$RESULT" || true
+    
+    # ANSI Colors for Status
+    local COLOR_RESET="\033[0m"
+    local COLOR_GREEN="\033[32m"
+    local COLOR_RED="\033[31m"
+    local COLOR_YELLOW="\033[33m"
+    
+    local PR_STAT="$STAT"
+    if [ "$STAT" == "Online" ]; then
+        PR_STAT="${COLOR_GREEN}${STAT}${COLOR_RESET}"
+    elif [ "$STAT" == "Degraded" ]; then
+        PR_STAT="${COLOR_YELLOW}${STAT}${COLOR_RESET}"
+    else
+        PR_STAT="${COLOR_RED}${STAT}${COLOR_RESET}"
+    fi
+    
+    printf "%-30s %-19b %-25s %-25s\n" "$CLUSTER" "$PR_STAT" "$START" "$STOP"
     echo ""
-    log "Talos API Access (via Bastion):"
-    echo "  1. SSH into Bastion:"
-    echo "     gcloud compute ssh ${BASTION_NAME} --zone ${ZONE} --tunnel-through-iap"
-    echo "  2. Run talosctl:"
-    echo "     talosctl --talosconfig talosconfig dashboard"
-    echo "--------------------------------------------------"
 }
 
 

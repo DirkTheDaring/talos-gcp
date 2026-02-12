@@ -33,12 +33,13 @@ ${YELLOW}Commands:${NC}
   ${GREEN}verify-storage${NC}     Run a PVC storage test.
 
 ${YELLOW}Options:${NC}
-  ${GREEN}-c, --config <FILE>${NC}  Load configuration from a specific file (default: cluster.env).
+  ${GREEN}-c, --config <FILE>${NC}  Load configuration from a specific file (default: cluster.env or TALOS_GCP_CONFIG).
   ${GREEN}-h, --help${NC}           Show this help message.
 
 ${YELLOW}Environment Variables (Overrides):${NC}
   These variables can be set to target specific clusters or regions, overriding the config file.
 
+  ${GREEN}TALOS_GCP_CONFIG${NC}   Default configuration file path (overrides cluster.env).
   ${GREEN}CLUSTER_NAME${NC}       Name of the cluster (default: talos-gcp-cluster).
   ${GREEN}PROJECT_ID${NC}         GCP Project ID.
   ${GREEN}REGION${NC}             GCP Region (e.g., us-central1).
