@@ -22,7 +22,7 @@ This document lists all environment variables that can be used to configure `tal
 | `WORKER_MACHINE_TYPE` | `${MACHINE_TYPE:-$DEFAULT_MACHINE_TYPE}` | Machine type for Worker nodes. |
 | `CP_DISK_SIZE` | `${DEFAULT_DISK_SIZE}` | Boot disk size for Control Plane nodes. |
 | `WORKER_DISK_SIZE` | `${DEFAULT_DISK_SIZE}` | Boot disk size for Worker nodes. |
-| `CP_COUNT` | `3` | Number of Control Plane nodes to deploy. |
+| `CP_COUNT` | `1` | Number of Control Plane nodes to deploy. |
 | `WORKER_COUNT` | `1` | Initial number of Worker nodes to deploy. |
 | `WORKER_ADDITIONAL_DISKS` | (Empty) | Space-separated list of additional disks to attach to worker nodes. Format: `type:size[:device-name]` (e.g., `pd-ssd:100GB:fast-data`). Device name is optional and defaults to `disk-N`. |
 
@@ -41,7 +41,7 @@ This document lists all environment variables that can be used to configure `tal
 | :--- | :--- | :--- |
 | `VPC_NAME` | `${CLUSTER_NAME}-vpc` | Name of the VPC network. In previous versions this defaulted to `talos-vpc`, now it is scoped to `CLUSTER_NAME`. |
 | `SUBNET_NAME` | `${CLUSTER_NAME}-subnet` | Name of the subnet. |
-| `SUBNET_RANGE` | `10.0.0.0/24` | The CIDR range for the subnet. Ensure this does not overlap if peering VPCs. |
+| `SUBNET_RANGE` | `10.100.0.0/20` | The CIDR range for the subnet. Ensure this does not overlap if peering VPCs. |
 - **`INGRESS_IPV4_CONFIG`** (Default: `""`)
     -   Defines ports to manually forward from the GCP Load Balancer to all worker nodes (e.g., `"80,443"`).
     -   **WARNING**: Leave empty if using `update-traefik` or any Cloud Controller Manager (CCM) `LoadBalancer` service. Setting creating manual rules for ports 80/443 will CONFLICT with the CCM.
@@ -53,7 +53,7 @@ This document lists all environment variables that can be used to configure `tal
 | Variable | Default (or Derived From) | Description |
 | :--- | :--- | :--- |
 | `TALOS_VERSION` | `v1.12.3` | The version of Talos Linux to install. Used to fetch the `talosctl` binary and image. |
-| `KUBECTL_VERSION` | `v1.35.0` | The version of `kubectl` to install on the Bastion host. |
+| `KUBECTL_VERSION` | `v1.32.0` | The version of `kubectl` to install on the Bastion host. |
 | `ARCH` | `amd64` | Architecture for the images (`amd64` or `arm64`). |
 
 ## Other Configuration

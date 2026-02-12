@@ -95,6 +95,7 @@ source "${SCRIPT_DIR}/lib/images.sh"
 source "${SCRIPT_DIR}/lib/bootstrap.sh"
 source "${SCRIPT_DIR}/lib/lifecycle.sh"
 source "${SCRIPT_DIR}/lib/ops.sh"
+source "${SCRIPT_DIR}/lib/schedule.sh"
 source "${SCRIPT_DIR}/lib/traefik.sh"
 source "${SCRIPT_DIR}/lib/orphans.sh"
 source "${SCRIPT_DIR}/lib/access.sh"
@@ -253,6 +254,11 @@ case "$COMMAND" in
         set_names
         check_dependencies
         update_traefik
+        ;;
+    update-schedule)
+        set_names
+        check_dependencies
+        update_schedule
         ;;
     orphans)
         set_names

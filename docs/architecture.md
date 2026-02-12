@@ -11,7 +11,7 @@ The cluster uses a Google Cloud **Internal TCP/UDP Load Balancer (L4 ILB)** to d
 **Key Characteristics:**
 -   **Type:** L4 Pass-through (No proxying).
 -   **Traffic Flow:** The Load Balancer forwards packets to the backend instances *without* changing the Destination IP. 
--   **Destination IP:** Packets arrive at the Control Plane node with the Destination IP set to the **Load Balancer's Internal IP** (e.g., `10.0.0.9`), *not* the node's own Internal IP (e.g., `10.0.0.15`).
+-   **Destination IP:** Packets arrive at the Control Plane node with the Destination IP set to the **Load Balancer's Internal IP** (e.g., `10.100.0.9`), *not* the node's own Internal IP (e.g., `10.100.0.15`).
 
 ### IP Aliasing (The `dummy0` Interface)
 
@@ -21,10 +21,10 @@ By default, a Linux kernel (and thus Talos) drops packets destined for an IP add
 **The Solution:**
 We configure an "IP Alias" on each Control Plane node.
 1.  **Interface:** We create a dummy interface named `dummy0`.
-2.  **Address:** We assign the Load Balancer's IP (`10.0.0.9/32`) to this interface.
+2.  **Address:** We assign the Load Balancer's IP (`10.100.0.9/32`) to this interface.
 
 **Result:**
-When a packet arrives destined for `10.0.0.9`, the kernel sees that `10.0.0.9` is a local address (on `dummy0`) and accepts the packet. The Kubernetes API Server, binding to `0.0.0.0` or `::`, then processes the request.
+When a packet arrives destined for `10.100.0.9`, the kernel sees that `10.100.0.9` is a local address (on `dummy0`) and accepts the packet. The Kubernetes API Server, binding to `0.0.0.0` or `::`, then processes the request.
 
 **Implementation Details:**
 This configuration is applied via the `controlplane.yaml` machine configuration text patch in `talos-gcp`:
@@ -35,7 +35,7 @@ machine:
     interfaces:
       - interface: dummy0
         addresses:
-          - 10.0.0.9/32  # The ILB IP
+          - 10.100.0.9/32  # The ILB IP
 ```
 
 ---

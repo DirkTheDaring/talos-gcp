@@ -96,7 +96,28 @@ WORKER_OPEN_SOURCE_RANGES="${WORKER_OPEN_SOURCE_RANGES:-0.0.0.0/0}"
 # Labels (Default: Empty)
 LABELS="${LABELS:-}"
 
+# Work Hours Schedule
+# Uses GCP Resource Policies (Instance Schedules)
+# WORK_HOURS_START/STOP format: HH:MM (24h)
+WORK_HOURS_START="${WORK_HOURS_START:-}"       # e.g. "08:00"
+WORK_HOURS_STOP="${WORK_HOURS_STOP:-}"         # e.g. "18:00"
+WORK_HOURS_DAYS="${WORK_HOURS_DAYS:-Mon-Fri}"  # e.g. "Mon-Fri", "Mon-Sat", "Mon,Wed,Fri"
 
+# Timezone (Auto-detect if unset)
+if [ -z "${WORK_HOURS_TIMEZONE:-}" ]; then
+    # We call detect_timezone from utils.sh, but we must ensure utils.sh is sourced.
+    # config.sh is usually sourced AFTER utils.sh in talos-gcp, but safer to check.
+    if command -v detect_timezone &>/dev/null; then
+        WORK_HOURS_TIMEZONE=$(detect_timezone "${REGION}")
+    else
+        # Fallback if utils.sh not loaded yet (shouldn't happen in main script)
+        WORK_HOURS_TIMEZONE="UTC"
+    fi
+fi
+export WORK_HOURS_TIMEZONE
+
+# Labels (Default: Empty)
+LABELS="${LABELS:-}"
 # Check & Default CLUSTER_NAME
 check_cluster_name() {
     if [ -z "${CLUSTER_NAME:-}" ]; then
@@ -168,13 +189,52 @@ set_names() {
     # e.g. talos-controlplane-N -> ${CLUSTER_NAME}-cp-N
     
     # Service Account (Truncate if needed, but check_cluster_name enforces <20 so -sa is safe)
-    SA_NAME="${CLUSTER_NAME}-sa"
+    # -------------------------------------------------------------------------
+    # SA Name Generation Strategy:
+    # 0. Allow explicit override via export SA_NAME="..."
+    # 1. Legacy: CLUSTER_NAME-sa
+    # 2. Resilient: CLUSTER_NAME-REGION_HASH-sa (Avoids conflicts)
+    
+    if [ -z "${SA_NAME:-}" ]; then
+        local LEGACY_SA_NAME="${CLUSTER_NAME}-sa"
+        local HAS_LEGACY=""
+
+        # Check if Legacy SA exists (Only if PROJECT_ID is available)
+        if [ -n "${PROJECT_ID:-}" ]; then
+            if gcloud iam service-accounts list --filter="email:${LEGACY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" --format="value(email)" --project="${PROJECT_ID}" 2>/dev/null | grep -q "${LEGACY_SA_NAME}"; then
+                HAS_LEGACY="true"
+            fi
+        fi
+
+        if [ "$HAS_LEGACY" == "true" ]; then
+             SA_NAME="${LEGACY_SA_NAME}"
+        else
+             # Generate short hash of region
+             local R_HASH="0000" # Safe default
+             if command -v md5sum &>/dev/null; then
+                 R_HASH=$(echo -n "${REGION}" | md5sum | cut -c1-4)
+             elif command -v cksum &>/dev/null; then
+                 R_HASH=$(echo -n "${REGION}" | cksum | cut -c1-4 | tr -d ' ')
+             fi
+             
+             # Ensure R_HASH didn't end up empty due to pipe failure
+             if [ -z "$R_HASH" ]; then R_HASH="0000"; fi
+             
+             SA_NAME="${CLUSTER_NAME}-${R_HASH}-sa"
+        fi
+    fi
+
     SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
     
     # Role-specific Service Accounts (Default to the main cluster SA)
     CP_SERVICE_ACCOUNT="${CP_SERVICE_ACCOUNT:-$SA_EMAIL}"
     WORKER_SERVICE_ACCOUNT="${WORKER_SERVICE_ACCOUNT:-$SA_EMAIL}"
     
+    # Schedulers
+    # Instance Schedule Policy (Zonal/Regional)
+    # Note: Resource Policies are Regional or Zonal. Instance Schedules are Regional in API but attached Zonally?
+    # Actually, `gcloud compute resource-policies create instance-schedule` requires --region.
+    SCHEDULE_POLICY_NAME="${CLUSTER_NAME}-schedule"    
     # Directory Isolation
     OUTPUT_DIR="$(pwd)/_out/${CLUSTER_NAME}"
     export OUTPUT_DIR

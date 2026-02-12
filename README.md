@@ -24,12 +24,12 @@ You can customize the deployment by setting environment variables before running
 | `CLUSTER_NAME` | Name of the Talos Cluster | `talos-gcp-cluster` |
 | `CP_MACHINE_TYPE` | Control Plane Machine Type | `e2-standard-2` |
 | `WORKER_MACHINE_TYPE` | Worker Machine Type | `e2-standard-2` |
-| `CP_DISK_SIZE` | Control Plane **Boot Disk** Size | `20GB` |
-| `WORKER_DISK_SIZE` | Worker **Boot Disk** Size | `20GB` |
-| `CP_COUNT` | Number of Control Plane Nodes | `3` |
+| `CP_DISK_SIZE` | Control Plane **Boot Disk** Size | `200GB` |
+| `WORKER_DISK_SIZE` | Worker **Boot Disk** Size | `200GB` |
+| `CP_COUNT` | Number of Control Plane Nodes | `1` |
 | `WORKER_COUNT` | Number of Worker Nodes | `1` |
 | `WORKER_ADDITIONAL_DISKS` | Additional Disks (type:size:device) | *(Empty)* |
-| `TALOS_VERSION` | Talos Version (e.g., v1.8.0) | *(Latest Valid)* |
+| `TALOS_VERSION` | Talos Version (e.g., v1.12.3) | *(Latest Valid)* |
 | `CP_TALOS_VERSION` | Control Plane Talos Version | `$TALOS_VERSION` |
 | `WORKER_EXTENSIONS` | Worker Extensions (e.g. gvisor) | *(Empty)* |
 
@@ -37,7 +37,7 @@ You can customize the deployment by setting environment variables before running
 
 ```ascii
 +----------------------------------------------------------------------------------------------------+
-| GCP Project (talos-vpc / 10.0.0.0/24)                                                              |
+| GCP Project (talos-vpc / 10.100.0.0/20)                                                              |
 |                                                                                                    |
 |   +-----------------+           +-----------------------+            +---------------------+       |
 |   |  Bastion Host   |           |     Control Plane     |            |     Worker Nodes    |       |
@@ -46,33 +46,36 @@ You can customize the deployment by setting environment variables before running
 |   +--------^--------+           +-----------^-----------+            +----------|----------+       |
 |            |                                |api (6443)                         |                  |
 |       (IAP Tunnel)                          |                                   v                  |
-|            ^                          (Internal LB)                        (Cloud NAT)             |
+|            ^                              (ILB)                            (Cloud NAT)             |
 |            |                                ^                                   |                  |
 |  +---------+---------+          +-----------+-----------+                       v                  |
-|  |   Admin User      |          |   Public LoadBalancer |                   (Internet)             |
-|  | (gcloud ssh ...)  |          |      (External IP)    |                                          |
+|  |   Admin User      |          |   Internal LoadBalancer |                  (Internet)            |
+|  | (gcloud ssh ...)  |          |      (Internal IP)      |                                        |
 |  +-------------------+          +-----------------------+                                          |
 +----------------------------------------------------------------------------------------------------+
 ```
 
 ## Architecture & Networking
 
-This deployment creates a high-availability Control Plane using Google Cloud's **Global TCP Load Balancer**.
+This deployment creates a secure, private Control Plane using Google Cloud's **Internal TCP Load Balancer**.
 
 ### Application Flow
-1.  **Frontend**: A global Anycast IP (`talos-lb-ip`) listens on **TCP port 443**.
-2.  **Load Balancer**: Forwards traffic to the `talos-ig` Instance Group.
-3.  **Health Check**: The LB probes each node on port **6443** (Kubernetes API).
-    *   **Control Plane Nodes**: Pass the check (API Server is running) -> Receive traffic.
-    *   **Worker Nodes**: Fail the check (No API Server) -> Ignored by LB.
-4.  **Backend**: Traffic reaches port 6443 on a healthy Control Plane node.
+1.  **Access**: All administrative access is routed through the **Identity-Aware Proxy (IAP)**.
+2.  **Load Balancer**: An **Internal** Load Balancer (`talos-cp-ilb`) listens on a private IP within the VPC.
+3.  **Health Check**: The LB probes each control plane node on port **6443** (Kubernetes API).
+4.  **Backend**: Traffic is forwarded to healthy Control Plane nodes.
+
+### Security Model
+*   **No Public API**: The Kubernetes API is **not** exposed to the public internet.
+*   **Bastion Host**: A hardened Bastion host is the only entry point for administrative tasks.
+*   **IAP Tunneling**: Admins connect via `gcloud compute ssh` which tunnels securely through Google's infrastructure without exposing SSH ports to the world.
 
 ### Access Configuration
-The script automatically retrieves the Load Balancer's public IP and embeds it into the generated configuration files:
-*   **talosconfig**: `endpoints: [ <LB_IP> ]`
-*   **kubeconfig**: `server: https://<LB_IP>:443`
+The script generates configuration files that point to the Internal Load Balancer (via local tunnels or bastion):
+*   **talosconfig**: Configured to use the local tunnel endpoint or Bastion proxy.
+*   **kubeconfig**: access via `kubectl` requires an active IAP tunnel.
 
-This ensures that all administrative commands (`talosctl`, `kubectl`) are routed through the highly available Load Balancer, providing resilience against individual node failures.
+See **[Secure Access Guide](docs/secure-access.md)** for connection details.
 
 ## Usage
 
@@ -142,6 +145,44 @@ export WORKER_COUNT=5
 
 The `apply` command is **idempotent**: it creates missing nodes and removes extra nodes to match `WORKER_COUNT`.
 
+## Cost Optimization (Scheduling)
+You can automatically start and stop the cluster (Control Plane and Workers) based on work hours to save costs.
+
+### 1. Enable Schedule
+Set the following variables in your `cluster.env` or environment:
+```bash
+# Start/Stop Times (24h format)
+export WORK_HOURS_START="08:00"
+export WORK_HOURS_STOP="18:00"
+
+# Days to Run (Default: Mon-Fri)
+export WORK_HOURS_DAYS="Mon-Fri"
+# Supported: Mon-Fri, Mon-Sat, Sun-Sat, 1-5, etc.
+
+# Timezone (Optional - Auto-detected from Region)
+# export WORK_HOURS_TIMEZONE="Europe/Berlin"
+```
+
+Apply the schedule:
+```bash
+./talos-gcp update-schedule
+```
+
+### 2. Disable Schedule
+To disable the schedule (run 24/7), simply unset the variables or remove them from `cluster.env`, then update:
+```bash
+# Remove variables from cluster.env, then:
+unset WORK_HOURS_START WORK_HOURS_STOP
+./talos-gcp update-schedule
+```
+*The script will detect that the variables are missing and remove the GCP Resource Policy from all instances.*
+
+### 3. Update Schedule
+Modify the variables and run `update-schedule` again. The changes are applied immediately to the GCP Resource Policy.
+
+---
+
+
 ## Secure Access (Identity-Aware Bastion)
 
 The cluster uses a hardened **Identity-Aware Bastion** for secure access.
@@ -199,8 +240,8 @@ Users connect via a single `gcloud` command that tunnels through IAP:
 ## Configuration Details
 
 ### Cloud Controller Manager (CCM)
-The script deploys the GCP CCM (`registry.k8s.io/cloud-provider-gcp/cloud-controller-manager:v28.2.1`) with specific flags to ensure compatibility with Talos:
-*   `--configure-cloud-routes=false`: Disabled to prevent conflicts with Talos CNI (Flannel/Cilium).
+The script deploys the GCP CCM (`registry.k8s.io/cloud-provider-gcp/cloud-controller-manager:v30.0.0`) with specific flags to ensure compatibility with Talos and modern CNIs:
+*   `--configure-cloud-routes=true`: Enabled to allow the CCM to manage routes for Pod CIDRs (required for some CNI modes).
 *   `--allocate-node-cidrs=true`: Enabled to allow IPAM to function correctly.
 *   `--cluster-cidr=10.244.0.0/16`: Matches default Talos PodCIDR to ensure correct node initialization.
 

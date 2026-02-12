@@ -87,8 +87,8 @@ You can customize the deployment by setting environment variables before running
 | `CLUSTER_NAME` | `talos-gcp-cluster` | Name of the cluster |
 | `MACHINE_TYPE` | `e2-standard-2` | VM Size for generic nodes |
 | `VPC_NAME` | `talos-vpc` | Name of the Custom VPC |
-| `SUBNET_RANGE` | `10.0.0.0/24` | IP Range for the Subnet |
-| `TALOS_VERSION` | *(latest stable)* | Specific Talos version (e.g. `v1.9.0`) |
+| `SUBNET_RANGE` | `10.100.0.0/20` | IP Range for the Subnet |
+| `TALOS_VERSION` | *(latest stable)* | Specific Talos version (e.g. `v1.12.3`) |
 
 **Example**:
 ```bash

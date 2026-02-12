@@ -30,7 +30,7 @@ New GCP projects often have low default quotas (e.g., 24 vCPUs globally, but som
     *   **Metric**: `CPUS` (Compute Engine API)
     *   **Location**: `us-central1` (or your chosen region)
 3.  Ensure you have at least **10 vCPUs** available.
-    *   *Usage*: 3 Control Plane + 1 Worker + 1 Bastion = 5 VMs * 2 vCPU = 10 vCPU.
+    *   *Usage*: 1 Control Plane + 1 Worker + 1 Bastion = 3 VMs * 2 vCPU = 6 vCPU (leaving room for expansion).
 4.  If not, select the quota and click **Edit Quotas** to request an increase.
 
 ## 5. Permissions

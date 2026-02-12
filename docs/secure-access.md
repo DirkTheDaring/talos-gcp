@@ -40,12 +40,12 @@ gcloud compute ssh talos-gcp-cluster-bastion \
     --project=api-project-651935823088 \
     --zone=us-central1-b \
     --tunnel-through-iap \
-    -- -N -L 6443:10.0.0.5:6443
+    -- -N -L 6443:10.100.0.5:6443
 ```
 
 **Key Flags:**
 *   **`-N`**: **REQUIRED for non-admins.** Tells SSH "no remote command". If you omit this, the connection will close immediately because the restricted shell denies interactive sessions.
-*   **`-L 6443:10.0.0.5:6443`**: Forwards your local port `6443` to the Cluster's Internal IP `10.0.0.5`.
+*   **`-L 6443:10.100.0.5:6443`**: Forwards your local port `6443` to the Cluster's Internal IP `10.100.0.5`.
 
 **Expected Behavior:**
 *   The command will appear to **hang/wait**. This is **NORMAL**.
@@ -76,7 +76,7 @@ Host k8s-tunnel
     User YOUR_USERNAME
     # Use gcloud as a proxy wrapper to handle IAP and keys automatically
     ProxyCommand gcloud compute ssh %r@%h --zone=us-central1-b --project=api-project-651935823088 --tunnel-through-iap -- -W %h:%p
-    LocalForward 6443 10.0.0.5:6443
+    LocalForward 6443 10.100.0.5:6443
     RequestTTY no
     ExitOnForwardFailure yes
 ```

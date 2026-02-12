@@ -384,3 +384,57 @@ ensure_admin_access() {
     fi
 }
 
+
+# Timezone Detection
+detect_timezone() {
+    local region="$1"
+    
+    # Prefix Matching
+    case "$region" in
+        us-central*)      echo "America/Chicago" ;;
+        us-east1*|us-east4*) echo "America/New_York" ;;
+        us-east5*)        echo "America/Detroit" ;; # Ohio? Usually Eastern.
+        us-west1*)        echo "America/Los_Angeles" ;; # Oregon
+        us-west2*)        echo "America/Los_Angeles" ;; # Los Angeles
+        us-west3*)        echo "America/Denver" ;; # Salt Lake City - MDT
+        us-west4*)        echo "America/Phoenix" ;; # Las Vegas
+        us-south1*)       echo "America/Chicago" ;; # Dallas
+        northamerica-northeast1*) echo "America/Montreal" ;;
+        northamerica-northeast2*) echo "America/Toronto" ;;
+        southamerica-east1*) echo "America/Sao_Paulo" ;;
+        southamerica-west1*) echo "America/Santiago" ;;
+        
+        europe-west1*)    echo "Europe/Brussels" ;; # Belgium
+        europe-west2*)    echo "Europe/London" ;;   # London
+        europe-west3*)    echo "Europe/Berlin" ;;   # Frankfurt
+        europe-west4*)    echo "Europe/Amsterdam" ;; # Eemshaven
+        europe-west6*)    echo "Europe/Zurich" ;;   # Zurich
+        europe-west8*)    echo "Europe/Rome" ;;     # Milan
+        europe-west9*)    echo "Europe/Paris" ;;    # Paris
+        europe-north1*)   echo "Europe/Helsinki" ;; # Finland
+        europe-central2*) echo "Europe/Warsaw" ;;   # Warsaw
+        europe-southwest1*) echo "Europe/Madrid" ;; # Madrid
+
+        asia-east1*)      echo "Asia/Taipei" ;;
+        asia-east2*)      echo "Asia/Hong_Kong" ;;
+        asia-northeast1*) echo "Asia/Tokyo" ;;
+        asia-northeast2*) echo "Asia/Seoul" ;;
+        asia-northeast3*) echo "Asia/Seoul" ;;
+        asia-southeast1*) echo "Asia/Singapore" ;;
+        asia-southeast2*) echo "Asia/Jakarta" ;;
+        asia-south1*)     echo "Asia/Kolkata" ;;
+        asia-south2*)     echo "Asia/Kolkata" ;; # Delhi
+        
+        australia-southeast1*) echo "Australia/Sydney" ;;
+        australia-southeast2*) echo "Australia/Melbourne" ;;
+        
+        me-west1*)        echo "Asia/Jerusalem" ;; # Tel Aviv
+        me-central1*)     echo "Asia/Dubai" ;;     # Doha? No, Dubai/Qatar. Usually +3/4. Lets use Dubai.
+        me-central2*)     echo "Asia/Riyadh" ;;    # Dammam
+        
+        *)
+            # Fallback to UTC if unknown
+            echo "UTC"
+            ;;
+    esac
+}

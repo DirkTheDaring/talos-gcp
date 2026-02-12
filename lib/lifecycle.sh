@@ -18,6 +18,9 @@ apply() {
     # Reconcile Workers (Create missing, Prune extra)
     phase2_workers || return 1
     
+    # Update Schedule (Work Hours)
+    update_schedule
+    
     log "Apply complete. Run 'talos-gcp status' to verify."
     status
 }
@@ -104,6 +107,9 @@ deploy_all() {
     # Create Workers AFTER CNI is ready (Critical for Cilium)
     phase2_workers || return 1
     
+    # Update Schedule (Work Hours)
+    update_schedule
+
     # Verify
     if [ "${INSTALL_CSI}" == "true" ]; then
         verify_storage || return 1
