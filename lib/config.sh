@@ -88,6 +88,11 @@ CILIUM_NATIVE_CIDR="${CILIUM_NATIVE_CIDR:-$POD_CIDR}"
 INGRESS_IP_COUNT="${INGRESS_IP_COUNT:-1}"
 INGRESS_IPV4_CONFIG="${INGRESS_IPV4_CONFIG:-}"
 
+# Custom Worker Ports (e.g. for WebRTC or other external services)
+WORKER_OPEN_TCP_PORTS="${WORKER_OPEN_TCP_PORTS:-}"     # e.g. "30000-32767"
+WORKER_OPEN_UDP_PORTS="${WORKER_OPEN_UDP_PORTS:-}"     # e.g. "30000-32767"
+WORKER_OPEN_SOURCE_RANGES="${WORKER_OPEN_SOURCE_RANGES:-0.0.0.0/0}"
+
 # Labels (Default: Empty)
 LABELS="${LABELS:-}"
 
@@ -145,6 +150,7 @@ set_names() {
     FW_HEALTH="${CLUSTER_NAME}-healthcheck"
     FW_INGRESS_BASE="${CLUSTER_NAME}-ingress"
     FW_BASTION_INTERNAL="${CLUSTER_NAME}-bastion-internal"
+    FW_WORKER_CUSTOM="${CLUSTER_NAME}-worker-custom"
     
     # Load Balancer Resources
     HC_CP_NAME="${CLUSTER_NAME}-cp-hc"

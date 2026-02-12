@@ -12,6 +12,9 @@ apply() {
     # Ensure Images exist (create if missing, skip if present)
     ensure_role_images || return 1
     
+    # Reconcile Networking (Firewall Rules, etc.) - Allows Day 2 updates
+    phase2_networking || return 1
+    
     # Reconcile Workers (Create missing, Prune extra)
     phase2_workers || return 1
     

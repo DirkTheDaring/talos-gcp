@@ -149,6 +149,48 @@ phase2_networking() {
             --project="${PROJECT_ID}"
     fi
 
+    # 5b. Custom Worker Ports (e.g. WebRTC)
+    # Sanitize input (remove spaces to prevent gcloud errors)
+    local open_tcp="${WORKER_OPEN_TCP_PORTS// /}"
+    local open_udp="${WORKER_OPEN_UDP_PORTS// /}"
+    local open_source_ranges="${WORKER_OPEN_SOURCE_RANGES// /}"
+    
+    if [ -n "$open_tcp" ] || [ -n "$open_udp" ]; then
+        log "Configuring Custom Worker Firewall Rule (${FW_WORKER_CUSTOM})..."
+        local allowed=""
+        if [ -n "$open_tcp" ]; then allowed="tcp:${open_tcp}"; fi
+        if [ -n "$open_udp" ]; then
+            if [ -n "$allowed" ]; then allowed="${allowed},"; fi
+            allowed="${allowed}udp:${open_udp}"
+        fi
+        
+        if gcloud compute firewall-rules describe "${FW_WORKER_CUSTOM}" --project="${PROJECT_ID}" &>/dev/null; then
+             log "Updating Custom Worker Firewall Rule..."
+             run_safe gcloud compute firewall-rules update "${FW_WORKER_CUSTOM}" \
+                 --project="${PROJECT_ID}" \
+                 --rules="${allowed}" \
+                 --source-ranges="${open_source_ranges}" \
+                 --target-tags="talos-worker"
+        else
+             log "Creating Custom Worker Firewall Rule..."
+             run_safe gcloud compute firewall-rules create "${FW_WORKER_CUSTOM}" \
+                 --project="${PROJECT_ID}" \
+                 --network="${VPC_NAME}" \
+                 --direction=INGRESS \
+                 --priority=1000 \
+                 --action=ALLOW \
+                 --rules="${allowed}" \
+                 --source-ranges="${open_source_ranges}" \
+                 --target-tags="talos-worker"
+        fi
+    else
+        # Cleanup if no ports defined
+        if gcloud compute firewall-rules describe "${FW_WORKER_CUSTOM}" --project="${PROJECT_ID}" &>/dev/null; then
+            log "Removing unused Custom Worker Firewall Rule (${FW_WORKER_CUSTOM})..."
+            run_safe gcloud compute firewall-rules delete "${FW_WORKER_CUSTOM}" --project="${PROJECT_ID}" -q
+        fi
+    fi
+
 
     # 6. Storage Network (Multi-NIC)
     if [ -n "${STORAGE_CIDR:-}" ]; then
