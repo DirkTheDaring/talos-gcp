@@ -8,7 +8,7 @@ ARCH="${ARCH:-amd64}"
 
 # Versions
 TALOS_VERSION="${TALOS_VERSION:-v1.12.3}"
-KUBECTL_VERSION="${KUBECTL_VERSION:-v1.32.0}"
+KUBECTL_VERSION="${KUBECTL_VERSION:-v1.35.0}"
 # Strict jq checking is in lib/utils.sh - make sure to install jq!
 # Global Variables
 ARCH=$(uname -m)

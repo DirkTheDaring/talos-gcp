@@ -53,7 +53,7 @@ This document lists all environment variables that can be used to configure `tal
 | Variable | Default (or Derived From) | Description |
 | :--- | :--- | :--- |
 | `TALOS_VERSION` | `v1.12.3` | The version of Talos Linux to install. Used to fetch the `talosctl` binary and image. |
-| `KUBECTL_VERSION` | `v1.32.0` | The version of `kubectl` to install on the Bastion host. |
+| `KUBECTL_VERSION` | `v1.35.0` | The version of `kubectl` to install on the Bastion host. |
 | `ARCH` | `amd64` | Architecture for the images (`amd64` or `arm64`). |
 
 ## Other Configuration

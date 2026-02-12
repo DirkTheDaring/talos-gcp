@@ -114,11 +114,11 @@ get_credentials() {
     # We can rely on 'talosctl' being available because check_dependencies runs first
     # and installs it if missing.
     # Note: 'gen config' creates talosconfig, controlplane.yaml, worker.yaml
-    run_safe talosctl gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${OUTPUT_DIR}/secrets.yaml" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
+    run_safe "$TALOSCTL" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${OUTPUT_DIR}/secrets.yaml" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
 
     # Configure talosconfig endpoint AND node
-    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" config endpoint "https://${CP_ILB_IP}:6443"
-    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig" config node "${CP_ILB_IP}"
+    run_safe "$TALOSCTL" --talosconfig "${OUTPUT_DIR}/talosconfig" config endpoint "https://${CP_ILB_IP}:6443"
+    run_safe "$TALOSCTL" --talosconfig "${OUTPUT_DIR}/talosconfig" config node "${CP_ILB_IP}"
     
     # 5. Fetch Kubeconfig from Bastion
     # We cannot run 'talosctl ... kubeconfig' locally because the API is internal.
@@ -138,8 +138,8 @@ get_credentials() {
 
     # Talosconfig (50005)
     cp "${OUTPUT_DIR}/talosconfig" "${OUTPUT_DIR}/talosconfig.local"
-    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig.local" config endpoint "https://127.0.0.1:50005"
-    run_safe talosctl --talosconfig "${OUTPUT_DIR}/talosconfig.local" config node "127.0.0.1"
+    run_safe "$TALOSCTL" --talosconfig "${OUTPUT_DIR}/talosconfig.local" config endpoint "https://127.0.0.1:50005"
+    run_safe "$TALOSCTL" --talosconfig "${OUTPUT_DIR}/talosconfig.local" config node "127.0.0.1"
 
     echo ""
     log "Credentials saved to: ${OUTPUT_DIR}"

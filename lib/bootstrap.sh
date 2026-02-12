@@ -358,7 +358,7 @@ deploy_csi() {
     
     # 1. Generate full manifest list using kustomize locally (requires kubectl)
     log "Generating CSI manifests..."
-    kubectl kustomize "${CSI_URL}" > "${OUTPUT_DIR}/csi-driver-original.yaml"
+    "$KUBECTL" kustomize "${CSI_URL}" > "${OUTPUT_DIR}/csi-driver-original.yaml"
     
     # 2. Patch manifests to remove HostPath mounts incompatible with Talos (/etc/udev, /lib/udev, /run/udev)
     cat <<EOF > "${OUTPUT_DIR}/patch_csi.py"

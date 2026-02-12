@@ -49,10 +49,10 @@ run_safe() {
 
 check_dependencies() {
     log "Checking dependencies..."
-    # strict dependencies
+    # strict dependencies (System Tools Only)
     for cmd in gcloud gsutil curl envsubst python3 jq; do
         if ! command -v "$cmd" &> /dev/null; then
-             error "$cmd is required but not installed."
+             error "System dependency '$cmd' is required but not installed."
              exit 1
         fi
     done
@@ -62,57 +62,6 @@ check_dependencies() {
         error "Python module 'PyYAML' is required but not installed."
         error "Please install it via: pip3 install PyYAML (or sudo apt install python3-yaml)"
         exit 1
-    fi
-
-    # Shared Tools Directory (Scoped to Cluster)
-    # Use _out/${CLUSTER_NAME}/tools to allow parallel execution with different versions
-    export TOOLS_DIR="$(pwd)/_out/${CLUSTER_NAME}/tools"
-    mkdir -p "${TOOLS_DIR}"
-    export PATH="${TOOLS_DIR}:$PATH"
-
-    # Talosctl Check & Auto-Install
-    if ! command -v talosctl &> /dev/null || ! talosctl version --client --short 2>&1 | grep -q "${TALOS_VERSION}"; then
-        if [ -f "${TOOLS_DIR}/talosctl" ] && "${TOOLS_DIR}/talosctl" version --client --short 2>&1 | grep -q "${TALOS_VERSION}"; then
-             log "Using cached talosctl from ${TOOLS_DIR}"
-        else
-            warn "Local talosctl version mismatch or missing."
-            log "Downloading talosctl ${TALOS_VERSION}..."
-            
-            # Download Talosctl
-            local OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-            if ! curl -L -o "${TOOLS_DIR}/talosctl" "https://github.com/siderolabs/talos/releases/download/${TALOS_VERSION}/talosctl-${OS}-${ARCH}"; then
-                 error "Failed to download talosctl."
-                 exit 1
-            fi
-            chmod +x "${TOOLS_DIR}/talosctl"
-        fi
-        
-        # Verify
-        if ! talosctl version --client --short 2>&1 | grep -q "${TALOS_VERSION}"; then
-             error "Failed to setup correct talosctl version."
-             exit 1
-        fi
-        log "Using talosctl ${TALOS_VERSION} from $(which talosctl)"
-    else
-        log "Using local talosctl ${TALOS_VERSION}"
-    fi
-
-    # Kubectl Version Check
-    if ! command -v kubectl &> /dev/null || [[ "$(kubectl version --client -o json 2>/dev/null | jq -r '.clientVersion.gitVersion')" != "${KUBECTL_VERSION}" ]]; then
-        if [ -f "${TOOLS_DIR}/kubectl" ] && [[ "$("${TOOLS_DIR}/kubectl" version --client -o json 2>/dev/null | jq -r '.clientVersion.gitVersion')" == "${KUBECTL_VERSION}" ]]; then
-             log "Using cached kubectl from ${TOOLS_DIR}"
-        else
-            log "kubectl not found or warning: version mismatch (Want ${KUBECTL_VERSION}). Downloading..."
-            
-            local OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-
-            if ! curl -Lo "${TOOLS_DIR}/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${OS}/${ARCH}/kubectl"; then
-                 warn "Failed to download kubectl ${KUBECTL_VERSION}. Continuing with existing version if any."
-            else
-                 chmod +x "${TOOLS_DIR}/kubectl"
-                 log "Downloaded kubectl to ${TOOLS_DIR}"
-            fi
-        fi
     fi
     
     # Check permissions early - REMOVED (Moved to specific phases)

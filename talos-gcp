@@ -99,6 +99,7 @@ source "${SCRIPT_DIR}/lib/schedule.sh"
 source "${SCRIPT_DIR}/lib/traefik.sh"
 source "${SCRIPT_DIR}/lib/orphans.sh"
 source "${SCRIPT_DIR}/lib/access.sh"
+source "${SCRIPT_DIR}/lib/binaries.sh"
 source "${SCRIPT_DIR}/lib/help.sh"
 
 # Call immediately to set defaults for global scope
@@ -116,6 +117,10 @@ COMMAND="$1"
 case "$COMMAND" in
     create)
         check_dependencies
+        # Ensure tools
+        export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
+        export KUBECTL=$(ensure_tool "kubectl" "${KUBECTL_VERSION}")
+        
         check_quotas
         deploy_all
         ;;
@@ -152,6 +157,7 @@ case "$COMMAND" in
     get-credentials)
         set_names
         check_dependencies
+        export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
         get_credentials
         ;;
     update-cilium)
@@ -188,12 +194,15 @@ case "$COMMAND" in
         fi
         check_dependencies
         check_quotas
+        export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
+        export KUBECTL=$(ensure_tool "kubectl" "${KUBECTL_VERSION}")
         apply
         ;;
 
     recreate-bastion)
         set_names
         check_dependencies || return 1
+
         ensure_service_account || return 1
         ensure_admin_access # Ensure we have rights to login to the new one
         

@@ -77,20 +77,17 @@ phase1_resources() {
     
     log "Ensuring local talosctl matches ${binary_version}..."
     if [ ! -f "${TALOSCTL_BIN}" ]; then
-         local local_ver=$(talosctl version --client --short 2>/dev/null || echo "none")
-         # Simple check (contains version string)
-         if [[ "$local_ver" == *"${binary_version}"* ]]; then
-             cp "$(which talosctl)" "${TALOSCTL_BIN}"
-         else
-             if command -v talosctl &>/dev/null; then
-                 # Fallback to system one but warn
-                 cp "$(which talosctl)" "${TALOSCTL_BIN}"
-                 warn "Local talosctl ($local_ver) might not match requested ($binary_version)."
-             else
-                 warn "talosctl not found locally. Bootstrap might fail if not in PATH."
-             fi
-         fi
-         chmod +x "${TALOSCTL_BIN}" || true
+        if [ -n "${TALOSCTL:-}" ] && [ -x "${TALOSCTL}" ]; then
+            log "Copying ensured talosctl from ${TALOSCTL}..."
+            cp "${TALOSCTL}" "${TALOSCTL_BIN}"
+            local local_ver=$("${TALOSCTL}" version --client --short 2>/dev/null || echo "none")
+            if [[ "$local_ver" != *"${binary_version}"* ]]; then
+                warn "Local talosctl ($local_ver) might not match requested ($binary_version)."
+            fi
+        else
+            warn "TALOSCTL variable not set or binary not found. Skipping local copy."
+        fi
+        chmod +x "${TALOSCTL_BIN}" || true
     fi
 }
 
