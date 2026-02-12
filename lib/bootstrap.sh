@@ -102,7 +102,7 @@ EOF
     deploy_ccm
 
     # Deploy CNI
-    deploy_cni
+    deploy_cni || return 1
 
     # Deploy CSI
     if [ "${INSTALL_CSI}" == "true" ]; then

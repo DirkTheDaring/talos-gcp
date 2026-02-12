@@ -117,6 +117,10 @@ case "$COMMAND" in
         deploy_all
         ;;
     destroy)
+        if [[ "${2:-}" == "-y" ]] || [[ "${2:-}" == "--yes" ]]; then
+            export CONFIRM_CHANGES="false"
+            shift
+        fi
         # check_dependencies - Not needed
         cleanup
         ;;

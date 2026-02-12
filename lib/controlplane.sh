@@ -137,31 +137,86 @@ def patch_file(filename, is_controlplane):
             if 'install' not in data['machine']: data['machine']['install'] = {}
             data['machine']['install']['image'] = install_image
 
-        # 7. Etcd Advertised Subnets (Fixes Peer URL Collision)
+        if install_image:
+            if 'machine' not in data: data['machine'] = {}
+            if 'install' not in data['machine']: data['machine']['install'] = {}
+            data['machine']['install']['image'] = install_image
+
+        # 7. Force Node IP Selection (Fixes Cert SAN mismatch)
+        if 'machine' not in data: data['machine'] = {}
+        if 'kubelet' not in data['machine']: data['machine']['kubelet'] = {}
+        if 'nodeIP' not in data['machine']['kubelet']: data['machine']['kubelet']['nodeIP'] = {}
+        # validSubnets forces Talos to pick IP from this range.
+        # We strictly INCLUDE the Primary Subnet.
+        # If STORAGE_CIDR is present, we EXCLUDE it.
+        valid_subnets = ["${SUBNET_RANGE}"]
+        storage_cidr_chk = "${STORAGE_CIDR}"
+        # robustness: strip whitespace to avoid false positives on empty/blank strings
+        if storage_cidr_chk and storage_cidr_chk.strip():
+            valid_subnets.append("!" + storage_cidr_chk.strip())
+        
+        data['machine']['kubelet']['nodeIP']['validSubnets'] = valid_subnets
+
+        # 8. Etcd Advertised Subnets (Fixes Peer URL Collision)
         # Force etcd to use the GCP Subnet for peering, ensuring unique IPs are advertised.
         if is_controlplane:
             if 'cluster' not in data: data['cluster'] = {}
             if 'etcd' not in data['cluster']: data['cluster']['etcd'] = {}
             # advertisedSubnets is a list of CIDRs
-            data['cluster']['etcd']['advertisedSubnets'] = ["${SUBNET_RANGE}"]
+            # advertisedSubnets is a list of CIDRs
+            advertised_subnets = ["${SUBNET_RANGE}"]
+            ilb_ip = "${CP_ILB_IP}"
+            # CRITICAL: Exclude the VIP from advertised subnets.
+            # If the VIP is included, nodes may try to peer with themselves via the VIP (loopback),
+            # causing "Peer URLs already exists" errors and quorum failure.
+            # By excluding it, we force Etcd to use the unique Node IP in the subnet.
+            if ilb_ip:
+                advertised_subnets.append("!" + ilb_ip)
+            data['cluster']['etcd']['advertisedSubnets'] = advertised_subnets
 
-        # 8. Multi-NIC Routing (Storage Network)
+        # 8.5 Enforce Custom CIDRs (Service & Pod)
+        if 'cluster' not in data: data['cluster'] = {}
+        if 'network' not in data['cluster']: data['cluster']['network'] = {}
+        
+        # Service CIDR
+        service_cidr = "${SERVICE_CIDR}"
+        if service_cidr:
+            data['cluster']['network']['serviceSubnets'] = [service_cidr]
+            
+        # Pod CIDR
+        pod_cidr = "${POD_CIDR}"
+        if pod_cidr:
+            data['cluster']['network']['podSubnets'] = [pod_cidr]
+
+        # Prepare Network Interfaces
+        if 'machine' not in data: data['machine'] = {}
+        if 'network' not in data['machine']: data['machine']['network'] = {}
+        if 'interfaces' not in data['machine']['network']: data['machine']['network']['interfaces'] = []
+        interfaces = data['machine']['network']['interfaces']
+
+        # 8. Global Network Configuration (MTU & Interfaces)
+        # Ensure nic0 (Primary) exists and has correct MTU (1460) for GCP.
+        # This is CRITICAL to prevent DHCP/Etcd packet drops.
+        nic0 = next((i for i in interfaces if i.get('deviceSelector', {}).get('busPath') == '0*'), None)
+        if not nic0:
+            nic0 = {'deviceSelector': {'busPath': '0*'}, 'dhcp': True}
+            interfaces.insert(0, nic0)
+        nic0['mtu'] = 1460
+
+        # 9. Multi-NIC Routing (Storage Network)
         storage_cidr = "${STORAGE_CIDR}"
         if storage_cidr:
-             if 'machine' not in data: data['machine'] = {}
-             if 'network' not in data['machine']: data['machine']['network'] = {}
-             if 'interfaces' not in data['machine']['network']: data['machine']['network']['interfaces'] = []
-             
-             interfaces = data['machine']['network']['interfaces']
-             # Find or Create nic1 (busPath 1*)
-             nic1 = next((i for i in interfaces if i.get('deviceSelector', {}).get('busPath') == '1*'), None)
-             
-             if not nic1:
-                 nic1 = {'deviceSelector': {'busPath': '1*'}}
-                 interfaces.append(nic1)
-                 
-             nic1['dhcp'] = True
-             nic1['ignoreDefaultRoute'] = True
+            # Configure nic1 (Storage)
+            nic1 = next((i for i in interfaces if i.get('deviceSelector', {}).get('busPath') == '1*'), None)
+            if not nic1:
+                nic1 = {'deviceSelector': {'busPath': '1*'}}
+                interfaces.append(nic1)
+            
+            nic1['dhcp'] = True
+            nic1['mtu'] = 1460
+            # Crucial: Prevent default gateway on storage network to force Primary IP selection
+            nic1['ignoreDefaultRoute'] = True
+
 
 
     with open(filename, 'w') as f:

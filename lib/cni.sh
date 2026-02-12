@@ -61,6 +61,27 @@ deploy_cilium() {
     # Note: We use specific GCP/Talos settings (IPAM kubernetes, VXLAN, KubeProxyReplacement, etc.)
     # We must substitute variables.
 
+    # Configure Routing Mode
+    local routing_mode="${CILIUM_ROUTING_MODE:-tunnel}"
+    local tunnel_protocol="vxlan"
+    local masquerade="true"
+    local native_cidr_line=""
+    local endpoint_routes=""
+
+    if [ "$routing_mode" == "native" ]; then
+        log "Configuring Cilium for NATIVE Routing (GCP Alias IPs)..."
+        tunnel_protocol=""  # Disable tunneling
+        masquerade="false"  # Pods are natively routable
+        endpoint_routes="endpointRoutes:\n  enabled: true" # Ensure local delivery
+        
+        # Explicit CIDR for native routing
+        if [ -n "${CILIUM_NATIVE_CIDR}" ]; then
+            native_cidr_line="ipv4NativeRoutingCIDR: \"${CILIUM_NATIVE_CIDR}\""
+        fi
+    else
+        log "Configuring Cilium for TUNNEL Routing (VXLAN)..."
+    fi
+
     cat <<EOF > "${OUTPUT_DIR}/cilium-values.yaml"
 ipam:
   mode: kubernetes
@@ -89,13 +110,15 @@ cgroup:
   autoMount:
     enabled: false
   hostRoot: /sys/fs/cgroup
-routingMode: tunnel
-tunnelProtocol: vxlan
-mtu: 1410
+routingMode: ${routing_mode}
+tunnelProtocol: ${tunnel_protocol}
+${endpoint_routes}
+${native_cidr_line}
+mtu: 1460
 debug:
   enabled: true
 bpf:
-  masquerade: true
+  masquerade: ${masquerade}
   hostLegacyRouting: true
 nodeinit:
   enabled: false

@@ -30,9 +30,9 @@ WORKER_EXTENSIONS="${WORKER_EXTENSIONS:-}"
 # Network
 VPC_NAME="${VPC_NAME:-${CLUSTER_NAME}-vpc}"
 SUBNET_NAME="${SUBNET_NAME:-${CLUSTER_NAME}-subnet}"
-SUBNET_RANGE="${SUBNET_RANGE:-10.0.0.0/24}"
-POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
-SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
+SUBNET_RANGE="${SUBNET_RANGE:-10.100.0.0/20}"  # Default: Nodes
+POD_CIDR="${POD_CIDR:-10.200.0.0/14}"          # Default: Pods (Alias IPs)
+SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/20}"   # Default: Services
 # Storage CIDR (Multi-NIC) - Default Empty (Opt-in)
 STORAGE_CIDR="${STORAGE_CIDR:-}"
 
@@ -50,8 +50,12 @@ INSTALL_CILIUM="${INSTALL_CILIUM:-true}"
 INSTALL_HUBBLE="${INSTALL_HUBBLE:-true}"
 INSTALL_CSI="${INSTALL_CSI:-true}"
 
+# Cilium Configuration (tunnel vs native)
+CILIUM_ROUTING_MODE="${CILIUM_ROUTING_MODE:-native}"
+CILIUM_NATIVE_CIDR="${CILIUM_NATIVE_CIDR:-$POD_CIDR}"
+
 # Ingress
-# Default: Empty (Use update-traefik / CCM. If utilizing HostPort/DaemonSet, set to "80,443")
+# Default: Empty
 # Ingress Defaults
 INGRESS_IP_COUNT="${INGRESS_IP_COUNT:-1}"
 INGRESS_IPV4_CONFIG="${INGRESS_IPV4_CONFIG:-}"

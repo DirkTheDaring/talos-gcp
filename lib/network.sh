@@ -56,11 +56,20 @@ phase2_networking() {
         log "Subnet '${SUBNET_NAME}' exists."
     else
         log "Creating Subnet '${SUBNET_NAME}'..."
-        run_safe gcloud compute networks subnets create "${SUBNET_NAME}" \
-            --network="${VPC_NAME}" \
-            --range="${SUBNET_RANGE}" \
-            --region="${REGION}" \
-            --project="${PROJECT_ID}"
+        
+        # Prepare Subnet Flags
+        local -a SUBNET_FLAGS
+        SUBNET_FLAGS=("--network=${VPC_NAME}" "--range=${SUBNET_RANGE}" "--region=${REGION}" "--project=${PROJECT_ID}")
+        
+        # Native Routing (Alias IPs)
+        if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
+             log "Enabling Secondary Range for Pods (Native Routing)..."
+             # Use CILIUM_NATIVE_CIDR (defaults to POD_CIDR)
+             local pod_range="${CILIUM_NATIVE_CIDR:-$POD_CIDR}"
+             SUBNET_FLAGS+=("--secondary-range=pods=${pod_range}")
+        fi
+
+        run_safe gcloud compute networks subnets create "${SUBNET_NAME}" "${SUBNET_FLAGS[@]}"
     fi
 
     # 3. Router
