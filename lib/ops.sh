@@ -299,35 +299,57 @@ status() {
         fi
     done
 
-    # 1. Fetch Instance Data
-    # Get name, status, lastStartTimestamp, lastStopTimestamp for all instances in the cluster
+    # 1. Fetch Resource Policies (Schedules) - Global
+    # We use this to map Cluster -> Schedule
+    local POLICY_JSON
+    # Use || echo "[]" to handle permissions/empty states
+    POLICY_JSON=$(gcloud compute resource-policies list --project="${PROJECT_ID}" --filter="name~'-schedule$'" --format="json(name,instanceSchedulePolicy)" 2>/dev/null || echo "[]")
+
+    declare -A SCHEDULE_MAP
+    if [ "$POLICY_JSON" != "[]" ]; then
+        # Parse JSON into Bash Map
+        while IFS=$'\t' read -r pol_name start_cron stop_cron tz; do
+             # Derive Cluster Name (remove -schedule suffix)
+             local cluster="${pol_name%-schedule}"
+             
+             # Simple Cron Parsing (Min Hour ...)
+             # e.g., "0 8 * * 1-5" -> mm=0, hh=8
+             local start_mm start_hh extra_start
+             local stop_mm stop_hh extra_stop
+             
+             read -r start_mm start_hh extra_start <<< "$start_cron"
+             read -r stop_mm stop_hh extra_stop <<< "$stop_cron"
+             
+             # Format time with leading zeros if needed (printf)
+             local fmt_start fmt_stop
+             printf -v fmt_start "%02d:%02d" "$start_hh" "$start_mm" 2>/dev/null || fmt_start="$start_hh:$start_mm"
+             printf -v fmt_stop "%02d:%02d" "$stop_hh" "$stop_mm" 2>/dev/null || fmt_stop="$stop_hh:$stop_mm"
+             
+             SCHEDULE_MAP["$cluster"]="${fmt_start}-${fmt_stop}"
+        done < <(echo "$POLICY_JSON" | jq -r '.[] | [.name, .instanceSchedulePolicy.vmStartSchedule.schedule, .instanceSchedulePolicy.vmStopSchedule.schedule, .instanceSchedulePolicy.timeZone] | @tsv')
+    fi
+
+    # 2. Fetch Instance Data (Global Scan)
+    # Get details for ALL Talos clusters in the project
     local INSTANCE_DATA
-    # Use || echo "[]" to prevent set -e from killing the script if gcloud returns non-zero (e.g. no instances found with specific filter warning)
+    # Use || echo "[]" to prevent set -e from killing the script if gcloud returns non-zero
     INSTANCE_DATA=$(gcloud compute instances list \
-        --filter="labels.cluster=${CLUSTER_NAME}" \
+        --filter="labels.cluster:*" \
         --project="${PROJECT_ID}" \
-        --format="json(name, status, lastStartTimestamp, lastStopTimestamp)" 2>/dev/null || echo "[]")
+        --format="json(name, status, lastStartTimestamp, lastStopTimestamp, labels.cluster)" 2>/dev/null || echo "[]")
     
     if [ -z "$INSTANCE_DATA" ] || [ "$INSTANCE_DATA" == "[]" ]; then
-        warn "No instances found for cluster '${CLUSTER_NAME}'."
+        warn "No Talos clusters found in project '${PROJECT_ID}'."
         return
     fi
     
-    # 2. Process Data using jq
-    # Logic:
-    # - Aggregated Status:
-    #   - If ANY instance is RUNNING -> "Online" (Operational)
-    #   - If ALL instances are TERMINATED/STOPPED -> "Offline"
-    #   - Otherwise -> "Transitioning" (Provisioning, Stopping, etc.)
-    # - Timestamps:
-    #   - Started At: Max(lastStartTimestamp) of RUNNING instances (when the last node came up)
-    #   - Stopped At: Max(lastStopTimestamp) of STOPPED instances (when the last node went down)
-    
-    # We output a TSV line: CLUSTER_NAME  STATUS  STARTED_AT  STOPPED_AT
-    
+    # 3. Process Data using jq (Group by Cluster)
     local RESULT
-    RESULT=$(echo "$INSTANCE_DATA" | jq -r --arg cluster "$CLUSTER_NAME" '
-        # Calculate counts
+    RESULT=$(echo "$INSTANCE_DATA" | jq -r '
+        group_by(.labels.cluster)[] |
+        (.[0].labels.cluster) as $cluster |
+        
+        # Calculate counts for THIS cluster
         length as $total |
         map(select(.status == "RUNNING")) | length as $running |
         ($total - $running) as $not_running |
@@ -338,40 +360,55 @@ status() {
          elif $total > 0 then "Offline"
          else "Unknown" end) as $status |
          
-        # Find latest Start Time (from currently RUNNING nodes)
+        # Find latest Start Time (from currently RUNNING nodes in this cluster)
         (map(select(.status == "RUNNING" and .lastStartTimestamp != null).lastStartTimestamp) | sort | last) as $started |
         
-        # Find latest Stop Time (from currently STOPPED nodes)
+        # Find latest Stop Time (from currently STOPPED nodes in this cluster)
         (try (map(select(.status != "RUNNING" and .lastStopTimestamp != null).lastStopTimestamp) | sort | last) catch null) as $stopped |
         
-        # Format Timestamps (Simple ISO to readable if possible, or keep as is)
+        # Format Timestamps
         def fmt(ts): if ts then (ts | split(".")[0] | sub("T"; " ")) else "-" end;
 
         [$cluster, $status, fmt($started), fmt($stopped)] | @tsv
     ')
     
-    # 3. Display Table
-    # Header
-    printf "%-30s %-10s %-25s %-25s\n" "CLUSTER" "STATUS" "STARTED AT" "STOPPED AT"
+    # 4. Display Table
+    echo "Project: ${PROJECT_ID}"
+    printf "%-40s %-10s %-15s %-20s %-20s\n" "CLUSTER" "STATUS" "SCHEDULE" "STARTED AT" "STOPPED AT"
     
-    IFS=$'\t' read -r CLUSTER STAT START STOP <<< "$RESULT" || true
-    
-    # ANSI Colors for Status
-    local COLOR_RESET="\033[0m"
-    local COLOR_GREEN="\033[32m"
-    local COLOR_RED="\033[31m"
-    local COLOR_YELLOW="\033[33m"
-    
-    local PR_STAT="$STAT"
-    if [ "$STAT" == "Online" ]; then
-        PR_STAT="${COLOR_GREEN}${STAT}${COLOR_RESET}"
-    elif [ "$STAT" == "Degraded" ]; then
-        PR_STAT="${COLOR_YELLOW}${STAT}${COLOR_RESET}"
-    else
-        PR_STAT="${COLOR_RED}${STAT}${COLOR_RESET}"
-    fi
-    
-    printf "%-30s %-19b %-25s %-25s\n" "$CLUSTER" "$PR_STAT" "$START" "$STOP"
+    while IFS=$'\t' read -r CLUSTER STAT START STOP; do
+        if [ -z "$CLUSTER" ]; then continue; fi
+        
+        # ANSI Colors for Status
+        local COLOR_RESET="\033[0m"
+        local COLOR_GREEN="\033[32m"
+        local COLOR_RED="\033[31m"
+        local COLOR_YELLOW="\033[33m"
+        local COLOR_BOLD="\033[1m"
+        local COLOR_CYAN="\033[36m"
+        
+        local PR_CLUSTER="$CLUSTER"
+        if [ "$CLUSTER" == "$CLUSTER_NAME" ]; then
+            PR_CLUSTER="${COLOR_BOLD}${CLUSTER} (current)${COLOR_RESET}"
+        fi
+        
+        local PR_STAT="$STAT"
+        if [ "$STAT" == "Online" ]; then
+            PR_STAT="${COLOR_GREEN}${STAT}${COLOR_RESET}"
+        elif [ "$STAT" == "Degraded" ]; then
+            PR_STAT="${COLOR_YELLOW}${STAT}${COLOR_RESET}"
+        else
+            PR_STAT="${COLOR_RED}${STAT}${COLOR_RESET}"
+        fi
+        
+        # Schedule Info
+        local SCHED="${SCHEDULE_MAP[$CLUSTER]:--}"
+        if [ "$SCHED" != "-" ]; then
+             SCHED="${COLOR_CYAN}${SCHED}${COLOR_RESET}"
+        fi
+        
+        printf "%-50b %-19b %-26b %-20s %-20s\n" "$PR_CLUSTER" "$PR_STAT" "$SCHED" "$START" "$STOP"
+    done <<< "$RESULT"
     echo ""
 }
 

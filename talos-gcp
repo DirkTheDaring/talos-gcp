@@ -4,7 +4,7 @@
 # Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
 
 #set -x
-echo "DEBUG: Script Started"
+
 set -euo pipefail
 
 # Configuration
