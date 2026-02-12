@@ -9,6 +9,9 @@ apply() {
     log "Applying configuration changes..."
     log "Target Worker Count: ${WORKER_COUNT}"
     
+    # Ensure Images exist (create if missing, skip if present)
+    ensure_role_images || return 1
+    
     # Reconcile Workers (Create missing, Prune extra)
     phase2_workers || return 1
     

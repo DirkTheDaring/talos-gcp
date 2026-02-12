@@ -38,7 +38,35 @@ STORAGE_CIDR="${STORAGE_CIDR:-}"
 
 # Compute
 CP_MACHINE_TYPE="${CP_MACHINE_TYPE:-e2-standard-2}"
+
+# Worker Configuration
 WORKER_MACHINE_TYPE="${WORKER_MACHINE_TYPE:-e2-standard-2}"
+
+# If "custom" is specified, we require VCPU and MEMORY config
+WORKER_VCPU="${WORKER_VCPU:-}"
+WORKER_MEMORY_GB="${WORKER_MEMORY_GB:-}"
+WORKER_MACHINE_FAMILY="${WORKER_MACHINE_FAMILY:-n2}" # Default to N2
+
+if [ "${WORKER_MACHINE_TYPE}" == "custom" ]; then
+    if [ -n "$WORKER_VCPU" ] && [ -n "$WORKER_MEMORY_GB" ]; then
+        # Verify values are integers
+        if ! [[ "$WORKER_VCPU" =~ ^[0-9]+$ ]] || ! [[ "$WORKER_MEMORY_GB" =~ ^[0-9]+$ ]]; then
+            error "WORKER_VCPU and WORKER_MEMORY_GB must be integers when using custom machine type."
+            exit 1
+        fi
+        # Convert GB to MB
+        WORKER_MEMORY_MB=$((WORKER_MEMORY_GB * 1024))
+        # Construct: FAMILY-custom-VCPU-MEM
+        WORKER_MACHINE_TYPE="${WORKER_MACHINE_FAMILY}-custom-${WORKER_VCPU}-${WORKER_MEMORY_MB}"
+    else
+        error "WORKER_MACHINE_TYPE is set to 'custom' but WORKER_VCPU or WORKER_MEMORY_GB is missing."
+        exit 1
+    fi
+elif [[ -n "$WORKER_VCPU" || -n "$WORKER_MEMORY_GB" ]]; then
+     # Warn if VCPU/Memory are set but ignored
+     warn "WORKER_VCPU/WORKER_MEMORY_GB are set but ignored because WORKER_MACHINE_TYPE is not 'custom'."
+     warn "Current Machine Type: ${WORKER_MACHINE_TYPE}"
+fi
 CP_DISK_SIZE="${CP_DISK_SIZE:-200GB}"
 WORKER_DISK_SIZE="${WORKER_DISK_SIZE:-200GB}"
 CP_COUNT="${CP_COUNT:-1}"

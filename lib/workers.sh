@@ -57,7 +57,22 @@ create_worker_instance() {
             NETWORK_FLAGS+=("--network-interface" "network=${VPC_STORAGE_NAME},subnet=${SUBNET_STORAGE_NAME},no-address")
     fi
 
-    if ! gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${worker_name}$"; then
+    if gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${worker_name}$"; then
+         # Check for Drift (Machine Type)
+         local current_mt
+         current_mt=$(gcloud compute instances describe "${worker_name}" --zone "${ZONE}" --project="${PROJECT_ID}" --format="value(machineType)" 2>/dev/null)
+         # Extract basename
+         current_mt="${current_mt##*/}"
+         
+         if [ "$current_mt" != "${WORKER_MACHINE_TYPE}" ]; then
+             warn "Worker ${worker_name} exists but has machine type '${current_mt}' (Expected: '${WORKER_MACHINE_TYPE}')."
+             warn "To apply the new machine type, you must recreate the worker:"
+             warn "  ./talos-gcp prune-worker ${worker_name} (Conceptual command, manually delete for now)"
+             warn "  gcloud compute instances delete ${worker_name} --zone ${ZONE}"
+         else
+             log "Worker ${worker_name} exists and matches configuration."
+         fi
+    else
          log "Creating worker node (${worker_name})..."
          run_safe retry gcloud compute instances create "${worker_name}" \
             --image "${WORKER_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \

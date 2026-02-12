@@ -114,6 +114,8 @@ COMMAND="$1"
 
 case "$COMMAND" in
     create)
+        check_dependencies
+        check_quotas
         deploy_all
         ;;
     destroy)
@@ -183,6 +185,8 @@ case "$COMMAND" in
             export CONFIRM_CHANGES="false"
             shift
         fi
+        check_dependencies
+        check_quotas
         apply
         ;;
 

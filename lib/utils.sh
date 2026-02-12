@@ -255,10 +255,54 @@ check_apis() {
 
 check_quotas() {
     log "Checking Quotas in ${REGION}..."
-    # We need roughly 10 vCPUs (3 CP + 1 Worker + 1 Bastion) * 2 vCPU = 10
-    local REQUIRED_CPUS=10
     
-    # Get Quota using jq for reliability
+    # 1. Calculate Required CPUs
+    local REQUIRED_CPUS_TOTAL=0
+    local REQUIRED_N2_CPUS=0
+    
+    # Bastion (e2-micro/small ~ 2 vCPU safe estimate)
+    REQUIRED_CPUS_TOTAL=$((REQUIRED_CPUS_TOTAL + 2))
+
+    # Control Plane
+    # helper to extract vcpu count from machine type string
+    get_vcpu_count() {
+        local mt="$1"
+        if [[ "$mt" =~ custom-([0-9]+)- ]]; then
+             echo "${BASH_REMATCH[1]}"
+        elif [[ "$mt" =~ standard-([0-9]+) ]]; then
+             echo "${BASH_REMATCH[1]}"
+        elif [[ "$mt" =~ highmem-([0-9]+) ]]; then
+             echo "${BASH_REMATCH[1]}"
+        elif [[ "$mt" =~ highcpu-([0-9]+) ]]; then
+             echo "${BASH_REMATCH[1]}"
+        else
+             # Default fallback for unknown standard types (e.g. e2-medium=2)
+             echo "2" 
+        fi
+    }
+
+    local cp_vcpu
+    cp_vcpu=$(get_vcpu_count "${CP_MACHINE_TYPE}")
+    REQUIRED_CPUS_TOTAL=$((REQUIRED_CPUS_TOTAL + (cp_vcpu * CP_COUNT)))
+    
+    # Check if CP is N2
+    if [[ "${CP_MACHINE_TYPE}" == n2-* ]]; then
+        REQUIRED_N2_CPUS=$((REQUIRED_N2_CPUS + (cp_vcpu * CP_COUNT)))
+    fi
+
+    # Workers
+    local worker_vcpu
+    worker_vcpu=$(get_vcpu_count "${WORKER_MACHINE_TYPE}")
+    REQUIRED_CPUS_TOTAL=$((REQUIRED_CPUS_TOTAL + (worker_vcpu * WORKER_COUNT)))
+
+    # Check if Worker is N2
+    if [[ "${WORKER_MACHINE_TYPE}" == n2-* ]]; then
+        REQUIRED_N2_CPUS=$((REQUIRED_N2_CPUS + (worker_vcpu * WORKER_COUNT)))
+    fi
+    
+    log "Required vCPUs: Total=${REQUIRED_CPUS_TOTAL}, N2=${REQUIRED_N2_CPUS}"
+
+    # 2. Get Quota using jq
     if ! command -v jq &> /dev/null; then warn "jq not found, skipping quota check."; return; fi
     
     local REGION_INFO
@@ -269,24 +313,39 @@ check_quotas() {
         return
     fi
 
-    # API returns floats (e.g. 24.0), so we use jq for arithmetic and floor to int
-    local AVAILABLE
-    AVAILABLE=$(echo "$REGION_INFO" | jq -r '
-        ([.quotas[] | select(.metric == "CPUS")][0] | .limit // 0) as $limit |
-        ([.quotas[] | select(.metric == "CPUS")][0] | .usage // 0) as $usage |
-        ($limit - $usage) | floor
-    ')
+    # Helper to check a specific metric
+    check_metric() {
+        local metric_name="$1"
+        local required="$2"
+        
+        [ "$required" -eq 0 ] && return 0
 
-    log "CPU Quota: Available=${AVAILABLE} (approx)"
+        local available
+        available=$(echo "$REGION_INFO" | jq -r --arg metric "$metric_name" '
+            ([.quotas[] | select(.metric == $metric)][0] | .limit // 0) as $limit |
+            ([.quotas[] | select(.metric == $metric)][0] | .usage // 0) as $usage |
+            ($limit - $usage) | floor
+        ')
+        
+        log "Quota '${metric_name}': Available=${available}, Required=${required}"
+        
+        if [ "$available" -lt "$required" ]; then
+            error "Insufficient '${metric_name}' Quota in ${REGION}."
+            error "Available: ${available}, Required: ${required}"
+            error "Please request a quota increase."
+            return 1
+        fi
+    }
+
+    # Check Global CPUS (Standard)
+    check_metric "CPUS" "$REQUIRED_CPUS_TOTAL" || exit 1
     
-    if [ "$AVAILABLE" -lt "$REQUIRED_CPUS" ]; then
-        error "Insufficient CPU Quota in ${REGION}."
-        error "Need ${REQUIRED_CPUS} vCPUs, but only ${AVAILABLE} are available."
-        error "Solution: Request a quota increase for 'CPUS' in '${REGION}'."
-        error "  -> Console: https://console.cloud.google.com/iam-admin/quotas?project=${PROJECT_ID}"
-        error "  -> CLI: gcloud alpha services quota update ... (Advanced)"
-        exit 1
+    # Check N2 CPUS if needed
+    if [ "$REQUIRED_N2_CPUS" -gt 0 ]; then
+         check_metric "N2_CPUS" "$REQUIRED_N2_CPUS" || exit 1
     fi
+    
+    log "✅ Quota check passed."
 }
 
 # Auto-Grant Admin Access
