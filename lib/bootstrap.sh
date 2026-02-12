@@ -146,17 +146,6 @@ deploy_ccm() {
     export POD_CIDR   # Export for envsubst
     # Inline Manifest to avoid external dependency
     cat <<EOF > "${OUTPUT_DIR}/gcp-ccm.yaml"
-    # ... (truncated for brevity, ensure previous context matches)
-EOF
-# Note: Since I cannot match the ENTIRE file content in TargetContent easily, 
-# I will use a smaller chunk replacement strategy.
-
-# STRATEGY:
-# 1. Insert variable definition at start of function.
-# 2. Replace the args line.
-
-# Let's try replacing the beginning of the function and the args line separately or in one go if contiguous.
-# The variable def needs to be before cat <<EOF.
 
 apiVersion: v1
 kind: ServiceAccount

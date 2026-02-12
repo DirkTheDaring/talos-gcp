@@ -82,6 +82,7 @@ EOF
         # Install/Upgrade
         echo 'Installing Traefik...'
         helm upgrade --install traefik traefik/traefik \
+            --version "${TRAEFIK_VERSION}" \
             --namespace traefik \
             --create-namespace \
             -f traefik-values.system.yaml \
