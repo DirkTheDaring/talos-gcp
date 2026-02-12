@@ -374,8 +374,9 @@ def patch_manifests(input_file, output_file):
         if doc and doc.get('kind') == 'DaemonSet' and doc.get('metadata', {}).get('name') == 'csi-gce-pd-node':
             # Patch Container VolumeMounts
             containers = doc['spec']['template']['spec']['containers']
-                    if 'volumeMounts' in c:
-                        c['volumeMounts'] = [vm for vm in c['volumeMounts'] if vm['name'] not in ['udev-rules-etc', 'udev-rules-lib', 'udev-socket']]
+            for c in containers:
+                if 'volumeMounts' in c:
+                    c['volumeMounts'] = [vm for vm in c['volumeMounts'] if vm['name'] not in ['udev-rules-etc', 'udev-rules-lib', 'udev-socket']]
             
             # Patch Duplicate Port Names (Pod-wide uniqueness)
             seen_port_names = set()
