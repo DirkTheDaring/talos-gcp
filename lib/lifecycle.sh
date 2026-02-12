@@ -194,13 +194,44 @@ cleanup() {
 
     # 5. IAM & Network
     log "Cleaning up IAM & Network..."
+
+    
+    # --- Safe Service Account Deletion ---
     if gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}" &> /dev/null; then
-            # Remove IAM bindings logic...
-            local ROLE
-            for ROLE in roles/compute.loadBalancerAdmin roles/compute.viewer roles/compute.securityAdmin roles/compute.networkViewer roles/compute.storageAdmin roles/compute.instanceAdmin.v1 roles/iam.serviceAccountUser; do
-                gcloud projects remove-iam-policy-binding "${PROJECT_ID}" --member serviceAccount:"${SA_EMAIL}" --role "${ROLE}" --quiet &> /dev/null || true
-            done
+        # Remove IAM bindings logic...
+        local ROLE
+        for ROLE in roles/compute.loadBalancerAdmin roles/compute.viewer roles/compute.securityAdmin roles/compute.networkViewer roles/compute.storageAdmin roles/compute.instanceAdmin.v1 roles/iam.serviceAccountUser; do
+            gcloud projects remove-iam-policy-binding "${PROJECT_ID}" --member serviceAccount:"${SA_EMAIL}" --role "${ROLE}" --quiet &> /dev/null || true
+        done
+        
+        # Safety Check: Only delete if matches generated pattern OR force flag is present
+        # Pattern: ${CLUSTER_NAME}-${HASH}-sa OR ${CLUSTER_NAME}-sa (Legacy)
+        # We construct a regex to match safe patterns.
+        # Hash is 4 chars hex (or similar).
+        # Legacy is just -sa.
+        # Custom names should be preserved unless --delete-service-account is used.
+        
+        local DELETE_SA="false"
+        
+        # Check for Force Flag (via env var or arg, assummed env var DELETE_SERVICE_ACCOUNT from args parsing in main script if implemented, or just safest default)
+        if [ "${DELETE_SERVICE_ACCOUNT:-false}" == "true" ]; then
+            DELETE_SA="true"
+        else
+            # Auto-Detection
+            # We restricting to [0-9a-f] to match md5sum hex output (and cksum digits).
+            # This prevents deleting custom names like 'prod' or 'test' (which have non-hex chars).
+            if [[ "${SA_NAME}" =~ ^${CLUSTER_NAME}-[0-9a-f]{4}-sa$ ]] || [[ "${SA_NAME}" == "${CLUSTER_NAME}-sa" ]]; then
+                DELETE_SA="true"
+            fi
+        fi
+        
+        if [ "$DELETE_SA" == "true" ]; then
+            log "Deleting Service Account '${SA_EMAIL}'..."
             gcloud iam service-accounts delete "${SA_EMAIL}" --project="${PROJECT_ID}" --quiet || warn "Could not delete SA."
+        else
+            log "Preserving Service Account '${SA_EMAIL}' (Does not match auto-generated pattern or --delete-service-account not set)."
+            warn "If you wish to delete it, run: gcloud iam service-accounts delete ${SA_EMAIL}"
+        fi
     fi
 
     # Delete ALL Firewall Rules attached to the VPC (Automated Cleanup)
@@ -225,6 +256,42 @@ cleanup() {
         warn "Could not delete Subnet."
     fi
     gcloud compute networks delete -q "${VPC_NAME}" --project="${PROJECT_ID}" || true
+
+    # --- Storage Network Cleanup (Multi-NIC) ---
+    # We explicitly define the names here to ensure cleanup happens even if STORAGE_CIDR (and thus the config.sh variables) 
+    # are missing from the current environment/config.
+    local LOCAL_VPC_STORAGE="${CLUSTER_NAME}-storage-vpc"
+    local LOCAL_SUBNET_STORAGE="${CLUSTER_NAME}-storage-subnet"
+    local LOCAL_FW_STORAGE="${CLUSTER_NAME}-storage-internal"
+
+    if [ -n "${LOCAL_VPC_STORAGE}" ]; then
+        log "Checking for Storage Network resources..."
+        # Firewall
+        if gcloud compute firewall-rules describe "${LOCAL_FW_STORAGE}" --project="${PROJECT_ID}" &>/dev/null; then
+            log "Deleting Storage Firewall '${LOCAL_FW_STORAGE}'..."
+            run_safe gcloud compute firewall-rules delete -q "${LOCAL_FW_STORAGE}" --project="${PROJECT_ID}" || warn "Failed to delete storage firewall."
+        fi
+        
+        # Subnet
+        if gcloud compute networks subnets describe "${LOCAL_SUBNET_STORAGE}" --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+            log "Deleting Storage Subnet '${LOCAL_SUBNET_STORAGE}'..."
+            run_safe gcloud compute networks subnets delete -q "${LOCAL_SUBNET_STORAGE}" --region="${REGION}" --project="${PROJECT_ID}" || warn "Failed to delete storage subnet."
+        fi
+
+        # VPC
+        if gcloud compute networks describe "${LOCAL_VPC_STORAGE}" --project="${PROJECT_ID}" &>/dev/null; then
+            log "Deleting Storage VPC '${LOCAL_VPC_STORAGE}'..."
+            run_safe gcloud compute networks delete -q "${LOCAL_VPC_STORAGE}" --project="${PROJECT_ID}" || warn "Failed to delete storage VPC."
+        fi
+    fi
+
+    # --- Schedule Policy Cleanup ---
+    if [ -n "${SCHEDULE_POLICY_NAME}" ]; then
+        if gcloud compute resource-policies describe "${SCHEDULE_POLICY_NAME}" --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+             log "Deleting Schedule Policy '${SCHEDULE_POLICY_NAME}'..."
+             run_safe gcloud compute resource-policies delete -q "${SCHEDULE_POLICY_NAME}" --region="${REGION}" --project="${PROJECT_ID}" || warn "Failed to delete schedule policy."
+        fi
+    fi
     
     if [ -n "${OUTPUT_DIR}" ] && [ "${OUTPUT_DIR}" != "/" ]; then
         rm -rf "${OUTPUT_DIR}" "patch_config.py"

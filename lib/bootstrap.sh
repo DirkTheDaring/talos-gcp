@@ -374,10 +374,23 @@ def patch_manifests(input_file, output_file):
         if doc and doc.get('kind') == 'DaemonSet' and doc.get('metadata', {}).get('name') == 'csi-gce-pd-node':
             # Patch Container VolumeMounts
             containers = doc['spec']['template']['spec']['containers']
-            for c in containers:
-                if c['name'] == 'gce-pd-driver':
                     if 'volumeMounts' in c:
                         c['volumeMounts'] = [vm for vm in c['volumeMounts'] if vm['name'] not in ['udev-rules-etc', 'udev-rules-lib', 'udev-socket']]
+            
+            # Patch Duplicate Port Names (Pod-wide uniqueness)
+            seen_port_names = set()
+            for c in containers:
+                if 'ports' in c:
+                    new_ports = []
+                    for p in c['ports']:
+                        p_name = p.get('name')
+                        if p_name:
+                            if p_name in seen_port_names:
+                                # Rename duplicate port to avoid warning/conflict
+                                p['name'] = f"{p_name}-{c['name']}"
+                            seen_port_names.add(p['name'])
+                        new_ports.append(p)
+                    c['ports'] = new_ports
             
             # Patch Volumes
             if 'volumes' in doc['spec']['template']['spec']:
@@ -407,11 +420,12 @@ set -e
 # Fix: Explicitly Create Namespace (Idempotent)
 kubectl --kubeconfig ~/.kube/config create namespace gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
 
+# Fix: Label for Pod Security Admission (Privileged)
+# Label BEFORE applying manifests to avoid admission warnings/denials
+kubectl --kubeconfig ~/.kube/config label namespace gce-pd-csi-driver pod-security.kubernetes.io/enforce=privileged --overwrite
+
 # Apply Patched Manifests
 kubectl --kubeconfig ~/.kube/config apply -f csi-driver-patched.yaml
-
-# Fix: Label for Pod Security Admission (Privileged)
-kubectl --kubeconfig ~/.kube/config label namespace gce-pd-csi-driver pod-security.kubernetes.io/enforce=privileged --overwrite
 
 # Fix: Create Secret for GCP Auth
 if [ -f "service-account.json" ]; then

@@ -109,6 +109,55 @@ list_orphans() {
              fi
          done < <(echo "$fwd_rules" | jq -r '.[] | "\(.name) \(.region) \(.IPAddress) \(.target)"')
     fi
+
+    # E. Storage VPCs (orphaned)
+    log "Scanning for Orphaned Storage VPCs..."
+    local storage_vpcs
+    if storage_vpcs=$(gcloud compute networks list --project="${PROJECT_ID}" --filter="name ~ .*-storage-vpc$" --format="json(name,creationTimestamp)" 2>/dev/null); then
+        while read -r name created; do
+             if [ -n "$name" ]; then
+                 local cluster_name=${name%-storage-vpc}
+                 if ! gcloud compute instances list --filter="labels.cluster=${cluster_name}" --limit=1 --format="value(name)" --project="${PROJECT_ID}" &>/dev/null; then
+                      add_orphan "VPC" "$name" "global" "Cluster '${cluster_name}' likely gone. Created: $created" "Network" "$name"
+                 fi
+             fi
+        done < <(echo "$storage_vpcs" | jq -r '.[] | "\(.name) \(.creationTimestamp)"')
+    fi
+
+    # F. Schedule Policies (orphaned)
+    log "Scanning for Orphaned Schedule Policies..."
+    local schedules
+    if schedules=$(gcloud compute resource-policies list --project="${PROJECT_ID}" --filter="name ~ .*-schedule$" --format="json(name,region,creationTimestamp)" 2>/dev/null); then
+        while read -r name region created; do
+             if [ -n "$name" ]; then
+                 local cluster_name=${name%-schedule}
+                 # Check if any instances exist for this cluster
+                 if ! gcloud compute instances list --filter="labels.cluster=${cluster_name}" --limit=1 --format="value(name)" --project="${PROJECT_ID}" &>/dev/null; then
+                      local region_name=$(basename "$region")
+                      add_orphan "SCHEDULE" "$name" "$region_name" "Cluster '${cluster_name}' likely gone. Created: $created" "Compute" "$name"
+                 fi
+             fi
+        done < <(echo "$schedules" | jq -r '.[] | "\(.name) \(.region) \(.creationTimestamp)"')
+    fi
+
+    # G. Storage Firewalls
+    log "Scanning for Orphaned Storage Firewalls..."
+    local storage_fws
+    if storage_fws=$(gcloud compute firewall-rules list --project="${PROJECT_ID}" --filter="name ~ .*-storage-internal$" --format="json(name,network,creationTimestamp)" 2>/dev/null); then
+        while read -r name network created; do
+             if [ -n "$name" ]; then
+                  local network_name=$(basename "$network")
+                  if ! gcloud compute networks describe "$network_name" --project="${PROJECT_ID}" &>/dev/null; then
+                      add_orphan "FIREWALL" "$name" "global" "Network '$network_name' missing. Created: $created" "Network" "$name"
+                  else
+                      local cluster_name=${name%-storage-internal}
+                      if ! gcloud compute instances list --filter="labels.cluster=${cluster_name}" --limit=1 --format="value(name)" --project="${PROJECT_ID}" &>/dev/null; then
+                          add_orphan "FIREWALL" "$name" "global" "Cluster '${cluster_name}' likely gone. Created: $created" "Network" "$name"
+                      fi
+                  fi
+             fi
+        done < <(echo "$storage_fws" | jq -r '.[] | "\(.name) \(.network) \(.creationTimestamp)"')
+    fi
     
     # --- Display ---
     echo ""
@@ -242,6 +291,27 @@ cleanup_orphans() {
                          log "Deleted."
                      else
                          error "Failed to delete forwarding rule."
+                     fi
+                     ;;
+                 "VPC")
+                     if run_safe gcloud compute networks delete "$name" --project="${PROJECT_ID}" --quiet; then
+                         log "Deleted."
+                     else
+                         error "Failed to delete VPC."
+                     fi
+                     ;;
+                 "SCHEDULE")
+                     if run_safe gcloud compute resource-policies delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
+                         log "Deleted."
+                     else
+                         error "Failed to delete Schedule."
+                     fi
+                     ;;
+                 "FIREWALL")
+                     if run_safe gcloud compute firewall-rules delete "$name" --project="${PROJECT_ID}" --quiet; then
+                         log "Deleted."
+                     else
+                         error "Failed to delete Firewall."
                      fi
                      ;;
                  *)
