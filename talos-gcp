@@ -290,12 +290,14 @@ case "$COMMAND" in
         verify_access "$@"
         ;;
     start)
+        shift
         # check_dependencies - Not needed
-        start_nodes
+        start_nodes "$@"
         ;;
     stop)
+        shift
         # check_dependencies - Not needed
-        stop_nodes
+        stop_nodes "$@"
         ;;
     help|--help|-h)
         show_help

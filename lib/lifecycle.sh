@@ -27,35 +27,61 @@ apply() {
 
 stop_nodes() {
     set_names
+    local TARGET_CLUSTER="${1:-$CLUSTER_NAME}"
+    local ZONE_FILTER="AND zone:(${ZONE})"
+    
+    if [ -n "${1:-}" ]; then
+        log "Stopping cluster '${TARGET_CLUSTER}' (searching all zones)..."
+        ZONE_FILTER=""
+    else
+        log "Stopping cluster '${TARGET_CLUSTER}' in zone ${ZONE}..."
+    fi
+
     # check_dependencies - Not needed
-    log "Stopping all Talos nodes to save costs..."
     local INSTANCES
-    INSTANCES=$(gcloud compute instances list --filter="name~'${CLUSTER_NAME}-.*' AND status:RUNNING AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
+    INSTANCES=$(gcloud compute instances list --filter="labels.cluster=${TARGET_CLUSTER} AND status:RUNNING ${ZONE_FILTER}" --format="value(name,zone)" --project="${PROJECT_ID}")
     
     if [ -n "$INSTANCES" ]; then
-        local INSTANCES_LIST
-        INSTANCES_LIST=$(echo "$INSTANCES" | tr '\n' ' ')
-        run_safe gcloud compute instances stop $INSTANCES_LIST --zone "${ZONE}" --project="${PROJECT_ID}"
-        log "All nodes stopped."
+        # We need to handle multiple zones if found
+        while read -r instance_name instance_zone; do
+            if [ -z "$instance_name" ]; then continue; fi
+            log "Stopping ${instance_name} in ${instance_zone}..."
+            run_safe gcloud compute instances stop "${instance_name}" --zone "${instance_zone}" --project="${PROJECT_ID}" &
+        done <<< "$INSTANCES"
+        wait
+        log "Nodes stopped."
     else
-        log "No running nodes found."
+        log "No running nodes found for '${TARGET_CLUSTER}'."
     fi
 }
 
 start_nodes() {
     set_names
+    local TARGET_CLUSTER="${1:-$CLUSTER_NAME}"
+    local ZONE_FILTER="AND zone:(${ZONE})"
+    
+    if [ -n "${1:-}" ]; then
+        log "Starting cluster '${TARGET_CLUSTER}' (searching all zones)..."
+        ZONE_FILTER=""
+    else
+        log "Starting cluster '${TARGET_CLUSTER}' in zone ${ZONE}..."
+    fi
+
     # check_dependencies - Not needed
-    log "Starting all Talos nodes..."
     local INSTANCES
-    INSTANCES=$(gcloud compute instances list --filter="name~'${CLUSTER_NAME}-.*' AND (status:TERMINATED OR status:STOPPED) AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
+    INSTANCES=$(gcloud compute instances list --filter="labels.cluster=${TARGET_CLUSTER} AND (status:TERMINATED OR status:STOPPED) ${ZONE_FILTER}" --format="value(name,zone)" --project="${PROJECT_ID}")
     
     if [ -n "$INSTANCES" ]; then
-        local INSTANCES_LIST
-        INSTANCES_LIST=$(echo "$INSTANCES" | tr '\n' ' ')
-        run_safe gcloud compute instances start $INSTANCES_LIST --zone "${ZONE}" --project="${PROJECT_ID}"
+        # We need to handle multiple zones if found
+        while read -r instance_name instance_zone; do
+            if [ -z "$instance_name" ]; then continue; fi
+            log "Starting ${instance_name} in ${instance_zone}..."
+            run_safe gcloud compute instances start "${instance_name}" --zone "${instance_zone}" --project="${PROJECT_ID}" &
+        done <<< "$INSTANCES"
+        wait
         log "Nodes started."
     else
-        log "No stopped nodes found."
+        log "No stopped nodes found for '${TARGET_CLUSTER}'."
     fi
 }
 

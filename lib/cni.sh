@@ -1,16 +1,19 @@
 #!/bin/bash
 
 deploy_cilium() {
-    log "Deploying Cilium via Helm..."
+    local FORCE_UPDATE="${1:-false}"
+    log "Deploying Cilium via Helm (Force: ${FORCE_UPDATE})..."
     
     # 0. Ensure Helm is installed on Bastion
     log "Ensuring Helm is installed on Bastion..."
     
-    # Check if Cilium is already running to avoid redundant reinstall
-    if gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get ds cilium -n kube-system" &> /dev/null; then
-         log "Cilium is already installed (DaemonSet found). Skipping installation."
-         log "Use './talos-gcp update-cilium' to force an upgrade."
-         return
+    # Check if Cilium is already running to avoid redundant reinstall (unless forced)
+    if [ "$FORCE_UPDATE" != "true" ]; then
+        if gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get ds cilium -n kube-system" &> /dev/null; then
+             log "Cilium is already installed (DaemonSet found). Skipping installation."
+             log "Use './talos-gcp update-cilium' to force an upgrade."
+             return
+        fi
     fi
 
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
@@ -26,17 +29,6 @@ deploy_cilium() {
     # Ensure kubeconfig is on Bastion (Critical for standalone execution)
     # We use structured path ~/.kube/config to avoid pollution
     if [ -f "${OUTPUT_DIR}/kubeconfig" ]; then
-        # Check if we really need to push it (Phase 4 might have done it)
-        # But to be safe for standalone usage:
-        # We don't want to overwrite if it exists? 
-        # Actually, let's assume ~/.kube/config is the source of truth.
-        # But if we are running from local, local might be newer?
-        # For consistency with other functions, we rely on ~/.kube/config being present or we push it there.
-        # However, scp to ~/.kube/config requires the dir to exist.
-        
-        # Let's just trust that phase4/bootstrap populated it.
-        # But if we run `update-cilium` standalone, we might need it.
-        # So we check existence on bastion.
         if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "test -f ~/.kube/config" &>/dev/null; then
              log "Pushing local kubeconfig to Bastion (~/.kube/config)..."
              run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "mkdir -p ~/.kube"
@@ -67,12 +59,16 @@ deploy_cilium() {
     local masquerade="true"
     local native_cidr_line=""
     local endpoint_routes=""
+    local mtu_line=""
 
     if [ "$routing_mode" == "native" ]; then
         log "Configuring Cilium for NATIVE Routing (GCP Alias IPs)..."
         tunnel_protocol=""  # Disable tunneling
         masquerade="false"  # Pods are natively routable
-        endpoint_routes="endpointRoutes:\n  enabled: true" # Ensure local delivery
+        # Correctly format endpointRoutes variable with a newline
+        endpoint_routes="endpointRoutes:
+  enabled: true"
+        mtu_line="mtu: 1460" # Native GCP MTU
         
         # Explicit CIDR for native routing
         if [ -n "${CILIUM_NATIVE_CIDR}" ]; then
@@ -80,6 +76,9 @@ deploy_cilium() {
         fi
     else
         log "Configuring Cilium for TUNNEL Routing (VXLAN)..."
+        # Tunnel Mode: Leave MTU empty to allow Cilium to auto-detect (usually 1460-50 = 1410)
+        # Setting "mtu: 1460" explicitly with VXLAN causes packet drops on GCP.
+        mtu_line="" 
     fi
 
     cat <<EOF > "${OUTPUT_DIR}/cilium-values.yaml"
@@ -114,7 +113,7 @@ routingMode: ${routing_mode}
 tunnelProtocol: ${tunnel_protocol}
 ${endpoint_routes}
 ${native_cidr_line}
-mtu: 1460
+${mtu_line}
 debug:
   enabled: true
 bpf:
@@ -199,13 +198,19 @@ EOF
     run_safe gcloud compute scp "${OUTPUT_DIR}/cilium-values.yaml" "${OUTPUT_DIR}/install_cilium.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
     
     log "Executing Helm Install on Bastion..."
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./install_cilium.sh && rm install_cilium.sh cilium-values.yaml"
-    rm -f "${OUTPUT_DIR}/cilium-values.yaml" "${OUTPUT_DIR}/install_cilium.sh"
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./install_cilium.sh && rm install_cilium.sh"
+    # rm -f "${OUTPUT_DIR}/cilium-values.yaml" "${OUTPUT_DIR}/install_cilium.sh"
+    log "Cilium values file preserved at: ${OUTPUT_DIR}/cilium-values.yaml"
+}
+
+update_cilium() {
+    log "Updating/Upgrading Cilium..."
+    deploy_cilium "true"
 }
 
 deploy_cni() {
     if [ "$INSTALL_CILIUM" == "true" ]; then
-        deploy_cilium
+        deploy_cilium "false"
     else
         log "Deploying CNI (Flannel)..."
         # Starting with Talos v1.12+, external cloud providers might need explicit CNI

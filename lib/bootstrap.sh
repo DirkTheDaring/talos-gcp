@@ -133,12 +133,31 @@ EOF
 
 deploy_ccm() {
     log "Deploying GCP Cloud Controller Manager..."
-    
+    # Determine Route Configuration based on Cilium Mode
+    local CONFIGURE_CLOUD_ROUTES="true"
+    if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
+        # Native Routing uses Alias IPs, so we DON'T want CCM to create legacy routes
+        CONFIGURE_CLOUD_ROUTES="false"
+    fi
+    log "CCM: configure-cloud-routes=${CONFIGURE_CLOUD_ROUTES} (Mode: ${CILIUM_ROUTING_MODE:-tunnel})"
+
     # Generate CCM Manifest using external template
     export CP_ILB_IP  # Export for envsubst if needed
     export POD_CIDR   # Export for envsubst
     # Inline Manifest to avoid external dependency
     cat <<EOF > "${OUTPUT_DIR}/gcp-ccm.yaml"
+    # ... (truncated for brevity, ensure previous context matches)
+EOF
+# Note: Since I cannot match the ENTIRE file content in TargetContent easily, 
+# I will use a smaller chunk replacement strategy.
+
+# STRATEGY:
+# 1. Insert variable definition at start of function.
+# 2. Replace the args line.
+
+# Let's try replacing the beginning of the function and the args line separately or in one go if contiguous.
+# The variable def needs to be before cat <<EOF.
+
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -193,7 +212,7 @@ spec:
         - --leader-elect=true
         - --use-service-account-credentials
         - --allocate-node-cidrs=true
-        - --configure-cloud-routes=true
+        - --configure-cloud-routes=${CONFIGURE_CLOUD_ROUTES}
         - --cluster-cidr=${POD_CIDR}
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
@@ -371,7 +390,14 @@ def patch_manifests(input_file, output_file):
     
     patched_docs = []
     for doc in docs:
-        if doc and doc.get('kind') == 'DaemonSet' and doc.get('metadata', {}).get('name') == 'csi-gce-pd-node':
+        kind = doc.get('kind')
+        name = doc.get('metadata', {}).get('name')
+        
+        # Patch both DaemonSet (Node) and Deployment (Controller)
+        if doc and (
+            (kind == 'DaemonSet' and name == 'csi-gce-pd-node') or 
+            (kind == 'Deployment' and name == 'csi-gce-pd-controller')
+        ):
             # Patch Container VolumeMounts
             containers = doc['spec']['template']['spec']['containers']
             for c in containers:

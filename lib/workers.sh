@@ -47,10 +47,16 @@ create_worker_instance() {
 
     # Workaround: gcloud filter hangs.
     # Prepare Network Interface Flags
+    local ALIAS_FLAG=""
+    if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
+        # Format: RANGE_NAME:CIDR_LENGTH (e.g. pods:/24)
+        ALIAS_FLAG=",aliases=pods:/24"
+    fi
+
     local -a NETWORK_FLAGS
     # NIC0: Primary (Cluster Network)
     # MUST use --network-interface if mixing with --network-interface for nic1
-    NETWORK_FLAGS=("--network-interface" "network=${VPC_NAME},subnet=${SUBNET_NAME},no-address")
+    NETWORK_FLAGS=("--network-interface" "network=${VPC_NAME},subnet=${SUBNET_NAME},no-address${ALIAS_FLAG}")
     
     # NIC1: Storage Network (Optional)
     if [ -n "${STORAGE_CIDR:-}" ]; then
