@@ -379,7 +379,7 @@ status() {
     while IFS=$'\t' read -r CLUSTER STAT START STOP; do
         if [ -z "$CLUSTER" ]; then continue; fi
         
-        # ANSI Colors for Status
+        # ANSI Colors
         local COLOR_RESET="\033[0m"
         local COLOR_GREEN="\033[32m"
         local COLOR_RED="\033[31m"
@@ -387,27 +387,46 @@ status() {
         local COLOR_BOLD="\033[1m"
         local COLOR_CYAN="\033[36m"
         
-        local PR_CLUSTER="$CLUSTER"
+        # 1. Cluster Name
+        local DISP_CLUSTER="$CLUSTER"
+        local IS_CURRENT="false"
         if [ "$CLUSTER" == "$CLUSTER_NAME" ]; then
-            PR_CLUSTER="${COLOR_BOLD}${CLUSTER} (current)${COLOR_RESET}"
+             DISP_CLUSTER="${CLUSTER} (current)"
+             IS_CURRENT="true"
+        fi
+        # Pad to 40
+        printf -v DISP_CLUSTER "%-40s" "$DISP_CLUSTER"
+        # Colorize
+        if [ "$IS_CURRENT" == "true" ]; then
+             DISP_CLUSTER="${COLOR_BOLD}${DISP_CLUSTER}${COLOR_RESET}"
         fi
         
-        local PR_STAT="$STAT"
+        # 2. Status
+        local DISP_STAT="$STAT"
+        # Pad to 10
+        printf -v DISP_STAT "%-10s" "$DISP_STAT"
+        # Colorize
         if [ "$STAT" == "Online" ]; then
-            PR_STAT="${COLOR_GREEN}${STAT}${COLOR_RESET}"
+            DISP_STAT="${COLOR_GREEN}${DISP_STAT}${COLOR_RESET}"
         elif [ "$STAT" == "Degraded" ]; then
-            PR_STAT="${COLOR_YELLOW}${STAT}${COLOR_RESET}"
+            DISP_STAT="${COLOR_YELLOW}${DISP_STAT}${COLOR_RESET}"
         else
-            PR_STAT="${COLOR_RED}${STAT}${COLOR_RESET}"
+            DISP_STAT="${COLOR_RED}${DISP_STAT}${COLOR_RESET}"
         fi
         
-        # Schedule Info
-        local SCHED="${SCHEDULE_MAP[$CLUSTER]:--}"
-        if [ "$SCHED" != "-" ]; then
-             SCHED="${COLOR_CYAN}${SCHED}${COLOR_RESET}"
+        # 3. Schedule
+        local SCHED_VAL="${SCHEDULE_MAP[$CLUSTER]:--}"
+        local DISP_SCHED="$SCHED_VAL"
+        # Pad to 15
+        printf -v DISP_SCHED "%-15s" "$DISP_SCHED"
+        # Colorize
+        if [ "$SCHED_VAL" != "-" ]; then
+             DISP_SCHED="${COLOR_CYAN}${DISP_SCHED}${COLOR_RESET}"
         fi
-        
-        printf "%-50b %-19b %-26b %-20s %-20s\n" "$PR_CLUSTER" "$PR_STAT" "$SCHED" "$START" "$STOP"
+
+        # Print Row (Use %b for colors, %s for timestamps which are already simple strings)
+        # Note: We use %s for DISP_* vars because the colors are embedded in the variable string itself.
+        printf "%b %b %b %-20s %-20s\n" "$DISP_CLUSTER" "$DISP_STAT" "$DISP_SCHED" "$START" "$STOP"
     done <<< "$RESULT"
     echo ""
 }
