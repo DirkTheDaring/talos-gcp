@@ -35,6 +35,7 @@ while [[ $# -gt 0 ]]; do
             # We defer to check dependencies or direct source
             source "$(dirname "$0")/lib/help.sh"
             show_help
+            exit 0
             ;;
         *)
             ARGS+=("$1")
@@ -100,6 +101,7 @@ source "${SCRIPT_DIR}/lib/traefik.sh"
 source "${SCRIPT_DIR}/lib/orphans.sh"
 source "${SCRIPT_DIR}/lib/access.sh"
 source "${SCRIPT_DIR}/lib/binaries.sh"
+
 source "${SCRIPT_DIR}/lib/help.sh"
 
 # Call immediately to set defaults for global scope

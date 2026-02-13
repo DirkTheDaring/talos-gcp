@@ -336,6 +336,7 @@ apply_ingress() {
          local fw_name="${FW_INGRESS_BASE}-v4-${i}"
          
          # 1. Get allocated IP Address
+         local ip_name="${CLUSTER_NAME}-ingress-v4-${i}"
          local ip_addr
          ip_addr=$(gcloud compute addresses describe "${ip_name}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
          

@@ -167,13 +167,14 @@ subjects:
   namespace: kube-system
 ---
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   labels:
     k8s-app: gcp-compute-persistent-disk-csi-driver
   name: gcp-cloud-controller-manager
   namespace: kube-system
 spec:
+  replicas: 1
   selector:
     matchLabels:
       k8s-app: gcp-cloud-controller-manager
@@ -184,6 +185,8 @@ spec:
     spec:
       serviceAccountName: cloud-controller-manager
       hostNetwork: true
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
       tolerations:
       - key: node.cloudprovider.kubernetes.io/uninitialized
         value: "true"
@@ -191,6 +194,9 @@ spec:
       - key: node-role.kubernetes.io/control-plane
         effect: NoSchedule
       - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      - key: node.cilium.io/agent-not-ready
+        operator: Exists
         effect: NoSchedule
       containers:
       - name: cloud-controller-manager
@@ -209,7 +215,7 @@ spec:
         - name: KUBERNETES_SERVICE_HOST
           value: "127.0.0.1"
         - name: KUBERNETES_SERVICE_PORT
-          value: "7445"
+          value: "6443"
         volumeMounts:
         - mountPath: /etc/gcp
           name: gcp-credentials
