@@ -206,6 +206,10 @@ spec:
         env:
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: /etc/gcp/key.json
+        - name: KUBERNETES_SERVICE_HOST
+          value: "127.0.0.1"
+        - name: KUBERNETES_SERVICE_PORT
+          value: "6443"
         volumeMounts:
         - mountPath: /etc/gcp
           name: gcp-credentials

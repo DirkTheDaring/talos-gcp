@@ -75,10 +75,13 @@ import yaml
 import os
 
 def patch_file(filename, is_controlplane):
+    print(f"Patching {filename} (ControlPlane={is_controlplane})...")
     if not os.path.exists(filename):
+        print(f"File {filename} not found!")
         return
     with open(filename, 'r') as f:
         docs = list(yaml.safe_load_all(f))
+    print(f"Loaded {len(docs)} documents.")
     for data in docs:
         if data.get('kind') == 'HostnameConfig': continue
         
@@ -154,7 +157,12 @@ def patch_file(filename, is_controlplane):
         # robustness: strip whitespace to avoid false positives on empty/blank strings
         if storage_cidr_chk and storage_cidr_chk.strip():
             valid_subnets.append("!" + storage_cidr_chk.strip())
+            
+        ilb_ip = "${CP_ILB_IP}"
+        if ilb_ip:
+            valid_subnets.append("!" + ilb_ip)
         
+        print(f"Setting validSubnets to: {valid_subnets}")
         data['machine']['kubelet']['nodeIP']['validSubnets'] = valid_subnets
 
         # 8. Etcd Advertised Subnets (Fixes Peer URL Collision)
@@ -187,6 +195,14 @@ def patch_file(filename, is_controlplane):
         pod_cidr = "${POD_CIDR}"
         if pod_cidr:
             data['cluster']['network']['podSubnets'] = [pod_cidr]
+
+        # 8.6 Disable internal IPAM in KubeControllerManager (Critical for CCM/Native Routing)
+        # If true, KCM allocates CIDRs ignoring GCP Alias IPs, causing split-brain.
+        if is_controlplane:
+            if 'cluster' not in data: data['cluster'] = {}
+            if 'controllerManager' not in data['cluster']: data['cluster']['controllerManager'] = {}
+            if 'extraArgs' not in data['cluster']['controllerManager']: data['cluster']['controllerManager']['extraArgs'] = {}
+            data['cluster']['controllerManager']['extraArgs']['allocate-node-cidrs'] = "false"
 
         # Prepare Network Interfaces
         if 'machine' not in data: data['machine'] = {}
@@ -226,7 +242,7 @@ patch_file("${OUTPUT_DIR}/controlplane.yaml", True)
 patch_file("${OUTPUT_DIR}/worker.yaml", False)
 PYEOF
     run_safe python3 "${OUTPUT_DIR}/patch_config.py"
-    rm -f "${OUTPUT_DIR}/patch_config.py"
+    # rm -f "${OUTPUT_DIR}/patch_config.py"
     
     # 4. Create Instances
     for ((i=0; i<${CP_COUNT}; i++)); do
@@ -238,6 +254,7 @@ PYEOF
         if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
             # Assign an Alias IP range from the 'pods' secondary range
             # Format: RANGE_NAME:CIDR_LENGTH (e.g. pods:/24)
+            log "Native Routing: Requesting Alias IP from 'pods' range for ${cp_name}..."
             ALIAS_FLAG=",aliases=pods:/24"
         fi
         
@@ -261,6 +278,17 @@ PYEOF
                 --service-account="${CP_SERVICE_ACCOUNT}" --scopes cloud-platform \
                 --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${CP_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
                 --metadata-from-file=user-data="${OUTPUT_DIR}/controlplane.yaml"
+        else
+            # Existing Instance Check
+            if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
+                # Check for Alias IP presence
+                local aliases
+                aliases=$(gcloud compute instances describe "${cp_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null)
+                if [ -z "$aliases" ]; then
+                    warn "Instance ${cp_name} exists but is MISSING Alias IPs required for Native Routing."
+                    warn "Recommendation: Replace this node to enable pod-to-pod connectivity."
+                fi
+            fi
         fi
         ensure_instance_in_ig "${cp_name}" "${IG_CP_NAME}"
     done

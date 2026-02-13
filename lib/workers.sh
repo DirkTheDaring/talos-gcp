@@ -50,6 +50,7 @@ create_worker_instance() {
     local ALIAS_FLAG=""
     if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
         # Format: RANGE_NAME:CIDR_LENGTH (e.g. pods:/24)
+        log "Native Routing: Requesting Alias IP from 'pods' range for ${worker_name}..."
         ALIAS_FLAG=",aliases=pods:/24"
     fi
 
@@ -77,6 +78,16 @@ create_worker_instance() {
              warn "  gcloud compute instances delete ${worker_name} --zone ${ZONE}"
          else
              log "Worker ${worker_name} exists and matches configuration."
+             
+             # Native Routing Drift Check
+             if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
+                 local aliases
+                 aliases=$(gcloud compute instances describe "${worker_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null)
+                 if [ -z "$aliases" ]; then
+                     warn "Worker ${worker_name} is MISSING Alias IPs required for Native Routing."
+                     warn "Run 'gcloud compute instances delete ${worker_name} --zone ${ZONE}' and re-run apply to fix."
+                 fi
+             fi
          fi
     else
          log "Creating worker node (${worker_name})..."

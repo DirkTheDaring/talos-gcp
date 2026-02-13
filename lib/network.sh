@@ -54,6 +54,23 @@ phase2_networking() {
     # 2. Subnet
     if gcloud compute networks subnets describe "${SUBNET_NAME}" --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
         log "Subnet '${SUBNET_NAME}' exists."
+        
+        # Native Routing Check: Ensure 'pods' secondary range exists
+        if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
+             local secondary_ranges
+             secondary_ranges=$(gcloud compute networks subnets describe "${SUBNET_NAME}" --region="${REGION}" --format="json(secondaryIpRanges)" --project="${PROJECT_ID}" | jq -r '.secondaryIpRanges[]?.rangeName' || echo "")
+             
+             if ! echo "$secondary_ranges" | grep -q "^pods$"; then
+                 log "Adding 'pods' secondary range to existing subnet (Native Routing compliance)..."
+                 local pod_range="${CILIUM_NATIVE_CIDR:-$POD_CIDR}"
+                 run_safe gcloud compute networks subnets update "${SUBNET_NAME}" \
+                     --region="${REGION}" \
+                     --add-secondary-ranges="pods=${pod_range}" \
+                     --project="${PROJECT_ID}"
+             else
+                 log "Subnet '${SUBNET_NAME}' already has 'pods' secondary range."
+             fi
+        fi
     else
         log "Creating Subnet '${SUBNET_NAME}'..."
         

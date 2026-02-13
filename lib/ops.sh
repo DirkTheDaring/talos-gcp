@@ -279,12 +279,22 @@ ssh_command() {
     # SSH into Bastion
     # Using StrictHostKeyChecking=no to avoid issues if bastion is recreated with same name/IP
     # "$@" passes remaining arguments to the ssh command
-    # Using 'exec' to replace the current process (cleaner exit signals/codes)
-    exec gcloud compute ssh "${BASTION_NAME}" \
-        --zone "${ZONE}" \
-        --project="${PROJECT_ID}" \
-        --tunnel-through-iap \
-        -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
+    
+    if [ $# -eq 0 ]; then
+        # Interactive Mode: exec is fine/preferred here
+        exec gcloud compute ssh "${BASTION_NAME}" \
+            --zone "${ZONE}" \
+            --project="${PROJECT_ID}" \
+            --tunnel-through-iap \
+            -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+    else
+        # Command Mode: DO NOT use exec, or the script will exit!
+        gcloud compute ssh "${BASTION_NAME}" \
+            --zone "${ZONE}" \
+            --project="${PROJECT_ID}" \
+            --tunnel-through-iap \
+            -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
+    fi
 }
 
 
@@ -676,4 +686,141 @@ EOF
     log "Cleaning up Test Resources..."
     gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl delete -f storage-test.yaml --grace-period=0 --force"
     rm -f "${OUTPUT_DIR}/storage-test.yaml"
+}
+
+verify_connectivity() {
+    log "Verifying Network Connectivity (Pod-to-Pod & DNS)..."
+    
+    # Prereq: Bastion
+    if ! ssh_command "true"; then
+        error "Cannot connect to Bastion."
+        return 1
+    fi
+
+    # 1. Deploy Net Test DaemonSet (tolerates everything)
+    log "Deploying Network Test DaemonSet..."
+    cat <<EOF > "${OUTPUT_DIR}/net-test.yaml"
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: net-test
+  namespace: default
+  labels:
+    app: net-test
+spec:
+  selector:
+    matchLabels:
+      app: net-test
+  template:
+    metadata:
+      labels:
+        app: net-test
+    spec:
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: net-test
+        image: busybox
+        command: ["/bin/sh", "-c", "sleep 3600"]
+EOF
+
+    run_safe gcloud compute scp "${OUTPUT_DIR}/net-test.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+    ssh_command "kubectl apply -f net-test.yaml"
+
+    log "Waiting for DaemonSet rollout..."
+    ssh_command "kubectl rollout status ds/net-test --timeout=120s"
+
+    # 2. Collect Pods
+    log "Collecting Pod information..."
+    # Format: NAME NODE IP ROLE
+    # We use a label selector to find CP nodes if possible, but busybox doesn't know node roles easily from inside.
+    # We'll relies on kubectl to tell us where they are.
+    local PODS_JSON
+    PODS_JSON=$(ssh_command "kubectl get pods -l app=net-test -o jsonpath='{range .items[*]}{.metadata.name}{\"\t\"}{.spec.nodeName}{\"\t\"}{.status.podIP}{\"\n\"}{end}'")
+    
+    # Parse into arrays: CP_PODS and WORKER_PODS
+    local -a cp_pods
+    local -a worker_pods
+    
+    while IFS=$'\t' read -r pod_name node_name pod_ip; do
+        if [[ "$node_name" == *"-cp-"* ]]; then
+            cp_pods+=("$pod_name|$node_name|$pod_ip")
+        elif [[ "$node_name" == *"-worker-"* ]]; then
+            worker_pods+=("$pod_name|$node_name|$pod_ip")
+        fi
+    done <<< "$PODS_JSON"
+
+    log "Found ${#cp_pods[@]} Control Plane pods and ${#worker_pods[@]} Worker pods."
+
+    if [ ${#cp_pods[@]} -eq 0 ] || [ ${#worker_pods[@]} -eq 0 ]; then
+        warn "Insufficient pods to test Cross-Node connectivity (Need at least 1 CP and 1 Worker)."
+        if [ ${#cp_pods[@]} -eq 0 ]; then warn "No CP pods found (Taints issue?)."; fi
+        if [ ${#worker_pods[@]} -eq 0 ]; then warn "No Worker pods found."; fi
+        # cleanup
+        ssh_command "kubectl delete -f net-test.yaml --grace-period=0 --force"
+        return 1
+    fi
+
+    # Pick representative pods
+    local cp_target="${cp_pods[0]}"
+    local worker_target="${worker_pods[0]}"
+    
+    IFS='|' read -r cp_pod cp_node cp_ip <<< "$cp_target"
+    IFS='|' read -r worker_pod worker_node worker_ip <<< "$worker_target"
+
+    log "Testing Connectivity:"
+    log "  Control Plane: ${cp_pod} (${cp_node}, ${cp_ip})"
+    log "  Worker:        ${worker_pod} (${worker_node}, ${worker_ip})"
+    echo ""
+
+    local fail_count=0
+
+    # Test A: CP -> Worker Ping
+    log "[Ping] Control Plane -> Worker (${worker_ip})..."
+    if ssh_command "kubectl exec ${cp_pod} -- ping -c 3 -W 2 ${worker_ip}"; then
+        echo "✅ Success"
+    else
+        echo "❌ FAILED"
+        ((fail_count++))
+    fi
+
+    # Test B: Worker -> CP Ping
+    log "[Ping] Worker -> Control Plane (${cp_ip})..."
+    if ssh_command "kubectl exec ${worker_pod} -- ping -c 3 -W 2 ${cp_ip}"; then
+         echo "✅ Success"
+    else
+         echo "❌ FAILED"
+         ((fail_count++))
+    fi
+    
+    # Test C: CP -> DNS
+    log "[DNS] Control Plane -> kubernetes.default..."
+    if ssh_command "kubectl exec ${cp_pod} -- nslookup kubernetes.default"; then
+         echo "✅ Success"
+    else
+         echo "❌ FAILED"
+         ((fail_count++))
+    fi
+    
+    # Test D: Worker -> DNS
+    log "[DNS] Worker -> kubernetes.default..."
+    if ssh_command "kubectl exec ${worker_pod} -- nslookup kubernetes.default"; then
+         echo "✅ Success"
+    else
+         echo "❌ FAILED"
+         ((fail_count++))
+    fi
+
+    # Cleanup
+    log "Cleaning up..."
+    ssh_command "kubectl delete -f net-test.yaml --grace-period=0 --force" >/dev/null
+    rm -f "${OUTPUT_DIR}/net-test.yaml"
+
+    if [ $fail_count -eq 0 ]; then
+        log "Verificaton Passed: Network is healthy."
+        return 0
+    else
+        error "Verification Failed: $fail_count tests failed."
+        return 1
+    fi
 }

@@ -254,6 +254,11 @@ case "$COMMAND" in
         check_dependencies
         verify_storage
         ;;
+    verify-connectivity)
+        set_names
+        check_dependencies
+        verify_connectivity
+        ;;
     update-labels)
         set_names
         check_dependencies
