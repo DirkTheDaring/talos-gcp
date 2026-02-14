@@ -1,44 +1,18 @@
-#!/bin/bash
 
-
-provision_controlplane_infra() {
-    provision_networking
-    provision_controlplane_nodes
-}
-
-provision_controlplane_nodes() {
-    log "Phase 3: Control Plane Nodes..."
-
-    # 1. Instance Group (Control Plane)
-    if ! gcloud compute instance-groups unmanaged describe "${IG_CP_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute instance-groups unmanaged create "${IG_CP_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}"
-        run_safe gcloud compute instance-groups set-named-ports "${IG_CP_NAME}" --named-ports tcp6443:6443 --zone "${ZONE}" --project="${PROJECT_ID}"
-    fi
-
-    # 2. Internal Load Balancer
-    # Health Check
-    if ! gcloud compute health-checks describe "${HC_CP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute health-checks create tcp "${HC_CP_NAME}" --region "${REGION}" --port 50000 --project="${PROJECT_ID}"
-    fi
-    # Backend Service
-    if ! gcloud compute backend-services describe "${BE_CP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute backend-services create "${BE_CP_NAME}" --region "${REGION}" --load-balancing-scheme=INTERNAL --protocol=TCP --health-checks-region="${REGION}" --health-checks="${HC_CP_NAME}" --project="${PROJECT_ID}"
-    fi
-    # Enforce correct Health Check (Fixes 50000 vs 6443 drift)
-    run_safe gcloud compute backend-services update "${BE_CP_NAME}" --region "${REGION}" --health-checks="${HC_CP_NAME}" --health-checks-region="${REGION}" --project="${PROJECT_ID}"
-    # IP Address
-    if ! gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute addresses create "${ILB_CP_IP_NAME}" --region "${REGION}" --subnet "${SUBNET_NAME}" --purpose=GCE_ENDPOINT --project="${PROJECT_ID}"
-    fi
-    local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
-    log "Control Plane Internal IP: ${CP_ILB_IP}"
+generate_talos_configs() {
+    log "Generating Talos Configuration Files..."
     
-    # Forwarding Rule
-    if ! gcloud compute forwarding-rules describe "${ILB_CP_RULE}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute forwarding-rules create "${ILB_CP_RULE}" --region "${REGION}" --load-balancing-scheme=INTERNAL --ports=6443,50000,50001 --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" --address="${ILB_CP_IP_NAME}" --backend-service="${BE_CP_NAME}" --project="${PROJECT_ID}"
+    # 1. Get Control Plane IP (Must exist)
+    local CP_ILB_IP
+    CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null)
+    
+    if [ -z "$CP_ILB_IP" ]; then
+        error "Control Plane Internal IP '${ILB_CP_IP_NAME}' not found. Cannot generate configs."
+        return 1
     fi
+    log "Using Control Plane VIP: ${CP_ILB_IP}"
 
-    # 3. Generate Secrets & Configs
+    # 2. Secrets
     local SECRETS_FILE="${OUTPUT_DIR}/secrets.yaml"
     if gsutil -q stat "${GCS_SECRETS_URI}"; then
         log "Downloading existing secrets..."
@@ -57,6 +31,7 @@ provision_controlplane_nodes() {
     fi
     chmod 600 "${SECRETS_FILE}"
 
+    # 3. Generate Configs
     log "Generating Configs (Endpoint: https://${CP_ILB_IP}:6443)..."
     rm -f "${OUTPUT_DIR}/controlplane.yaml" "${OUTPUT_DIR}/worker.yaml" "${OUTPUT_DIR}/talosconfig"
     
@@ -68,7 +43,7 @@ provision_controlplane_nodes() {
         run_safe "$TALOSCTL" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${SECRETS_FILE}" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
     fi
 
-    # Patch Configs (External Cloud Provider & certSANs)
+    # 4. Patch Configs
     cat <<PYEOF > "${OUTPUT_DIR}/patch_config.py"
 import sys
 import yaml
@@ -140,64 +115,45 @@ def patch_file(filename, is_controlplane):
             if 'install' not in data['machine']: data['machine']['install'] = {}
             data['machine']['install']['image'] = install_image
 
-        if install_image:
-            if 'machine' not in data: data['machine'] = {}
-            if 'install' not in data['machine']: data['machine']['install'] = {}
-            data['machine']['install']['image'] = install_image
-
         # 7. Force Node IP Selection (Fixes Cert SAN mismatch)
         if 'machine' not in data: data['machine'] = {}
         if 'kubelet' not in data['machine']: data['machine']['kubelet'] = {}
         if 'nodeIP' not in data['machine']['kubelet']: data['machine']['kubelet']['nodeIP'] = {}
-        # validSubnets forces Talos to pick IP from this range.
-        # We strictly INCLUDE the Primary Subnet.
-        # If STORAGE_CIDR is present, we EXCLUDE it.
-        valid_subnets = ["${SUBNET_RANGE}"]
+        validSubnets = ["${SUBNET_RANGE}"]
         storage_cidr_chk = "${STORAGE_CIDR}"
-        # robustness: strip whitespace to avoid false positives on empty/blank strings
         if storage_cidr_chk and storage_cidr_chk.strip():
-            valid_subnets.append("!" + storage_cidr_chk.strip())
+            validSubnets.append("!" + storage_cidr_chk.strip())
             
         ilb_ip = "${CP_ILB_IP}"
         if ilb_ip:
-            valid_subnets.append("!" + ilb_ip)
+            validSubnets.append("!" + ilb_ip)
         
-        print(f"Setting validSubnets to: {valid_subnets}")
-        data['machine']['kubelet']['nodeIP']['validSubnets'] = valid_subnets
+        print(f"Setting validSubnets to: {validSubnets}")
+        data['machine']['kubelet']['nodeIP']['validSubnets'] = validSubnets
 
-        # 8. Etcd Advertised Subnets (Fixes Peer URL Collision)
-        # Force etcd to use the GCP Subnet for peering, ensuring unique IPs are advertised.
+        # 8. Etcd Advertised Subnets
         if is_controlplane:
             if 'cluster' not in data: data['cluster'] = {}
             if 'etcd' not in data['cluster']: data['cluster']['etcd'] = {}
-            # advertisedSubnets is a list of CIDRs
-            # advertisedSubnets is a list of CIDRs
             advertised_subnets = ["${SUBNET_RANGE}"]
             ilb_ip = "${CP_ILB_IP}"
-            # CRITICAL: Exclude the VIP from advertised subnets.
-            # If the VIP is included, nodes may try to peer with themselves via the VIP (loopback),
-            # causing "Peer URLs already exists" errors and quorum failure.
-            # By excluding it, we force Etcd to use the unique Node IP in the subnet.
             if ilb_ip:
                 advertised_subnets.append("!" + ilb_ip)
             data['cluster']['etcd']['advertisedSubnets'] = advertised_subnets
 
-        # 8.5 Enforce Custom CIDRs (Service & Pod)
+        # 8.5 Enforce Custom CIDRs
         if 'cluster' not in data: data['cluster'] = {}
         if 'network' not in data['cluster']: data['cluster']['network'] = {}
         
-        # Service CIDR
         service_cidr = "${SERVICE_CIDR}"
         if service_cidr:
             data['cluster']['network']['serviceSubnets'] = [service_cidr]
             
-        # Pod CIDR
         pod_cidr = "${POD_CIDR}"
         if pod_cidr:
             data['cluster']['network']['podSubnets'] = [pod_cidr]
 
-        # 8.6 Disable internal IPAM in KubeControllerManager (Critical for CCM/Native Routing)
-        # If true, KCM allocates CIDRs ignoring GCP Alias IPs, causing split-brain.
+        # 8.6 Disable internal IPAM in KubeControllerManager
         if is_controlplane:
             if 'cluster' not in data: data['cluster'] = {}
             if 'controllerManager' not in data['cluster']: data['cluster']['controllerManager'] = {}
@@ -210,9 +166,7 @@ def patch_file(filename, is_controlplane):
         if 'interfaces' not in data['machine']['network']: data['machine']['network']['interfaces'] = []
         interfaces = data['machine']['network']['interfaces']
 
-        # 8. Global Network Configuration (MTU & Interfaces)
-        # Ensure nic0 (Primary) exists and has correct MTU (1460) for GCP.
-        # This is CRITICAL to prevent DHCP/Etcd packet drops.
+        # 8. Global Network Configuration
         nic0 = next((i for i in interfaces if i.get('deviceSelector', {}).get('busPath') == '0*'), None)
         if not nic0:
             nic0 = {'deviceSelector': {'busPath': '0*'}, 'dhcp': True}
@@ -221,19 +175,15 @@ def patch_file(filename, is_controlplane):
 
         # 9. Multi-NIC Routing (Storage Network)
         storage_cidr = "${STORAGE_CIDR}"
-        if storage_cidr:
-            # Configure nic1 (Storage)
+        cp_use_storage = "${CP_USE_STORAGE_NETWORK}" == "true"
+
+        if storage_cidr and cp_use_storage:
             nic1 = next((i for i in interfaces if i.get('deviceSelector', {}).get('busPath') == '1*'), None)
             if not nic1:
                 nic1 = {'deviceSelector': {'busPath': '1*'}}
                 interfaces.append(nic1)
-            
             nic1['dhcp'] = True
             nic1['mtu'] = 1460
-            # Crucial: Prevent default gateway on storage network to force Primary IP selection
-            # nic1['ignoreDefaultRoute'] = True (Removed: Causes boot loop on Talos v1.12.3)
-
-
 
     with open(filename, 'w') as f:
         yaml.safe_dump_all(docs, f)
@@ -242,8 +192,50 @@ patch_file("${OUTPUT_DIR}/controlplane.yaml", True)
 patch_file("${OUTPUT_DIR}/worker.yaml", False)
 PYEOF
     run_safe python3 "${OUTPUT_DIR}/patch_config.py"
-    # rm -f "${OUTPUT_DIR}/patch_config.py"
+}
+
+
+
+
+provision_controlplane_infra() {
+    provision_networking
+    provision_controlplane_nodes
+}
+
+provision_controlplane_nodes() {
+    log "Phase 3: Control Plane Nodes..."
+
+    # 1. Instance Group (Control Plane)
+    if ! gcloud compute instance-groups unmanaged describe "${IG_CP_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
+        run_safe gcloud compute instance-groups unmanaged create "${IG_CP_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}"
+        run_safe gcloud compute instance-groups set-named-ports "${IG_CP_NAME}" --named-ports tcp6443:6443 --zone "${ZONE}" --project="${PROJECT_ID}"
+    fi
+
+    # 2. Internal Load Balancer
+    # Health Check
+    if ! gcloud compute health-checks describe "${HC_CP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+        run_safe gcloud compute health-checks create tcp "${HC_CP_NAME}" --region "${REGION}" --port 50000 --project="${PROJECT_ID}"
+    fi
+    # Backend Service
+    if ! gcloud compute backend-services describe "${BE_CP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+        run_safe gcloud compute backend-services create "${BE_CP_NAME}" --region "${REGION}" --load-balancing-scheme=INTERNAL --protocol=TCP --health-checks-region="${REGION}" --health-checks="${HC_CP_NAME}" --project="${PROJECT_ID}"
+    fi
+    # Enforce correct Health Check (Fixes 50000 vs 6443 drift)
+    run_safe gcloud compute backend-services update "${BE_CP_NAME}" --region "${REGION}" --health-checks="${HC_CP_NAME}" --health-checks-region="${REGION}" --project="${PROJECT_ID}"
+    # IP Address
+    if ! gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+        run_safe gcloud compute addresses create "${ILB_CP_IP_NAME}" --region "${REGION}" --subnet "${SUBNET_NAME}" --purpose=GCE_ENDPOINT --project="${PROJECT_ID}"
+    fi
+    local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
     
+    # Forwarding Rule
+    if ! gcloud compute forwarding-rules describe "${ILB_CP_RULE}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
+        run_safe gcloud compute forwarding-rules create "${ILB_CP_RULE}" --region "${REGION}" --load-balancing-scheme=INTERNAL --ports=6443,50000,50001 --network="${VPC_NAME}" --subnet="${SUBNET_NAME}" --address="${ILB_CP_IP_NAME}" --backend-service="${BE_CP_NAME}" --project="${PROJECT_ID}"
+    fi
+
+    # 3. Generate Secrets & Configs
+    generate_talos_configs
+
     # 4. Create Instances
     for ((i=0; i<${CP_COUNT}; i++)); do
         local cp_name="${CLUSTER_NAME}-cp-$i"
@@ -265,7 +257,9 @@ PYEOF
         
         # NIC1: Storage Network (Optional)
         if [ -n "${STORAGE_CIDR:-}" ]; then
-             NETWORK_FLAGS+=("--network-interface" "network=${VPC_STORAGE_NAME},subnet=${SUBNET_STORAGE_NAME},no-address")
+             if [ "${CP_USE_STORAGE_NETWORK:-false}" == "true" ]; then
+                 NETWORK_FLAGS+=("--network-interface" "network=${VPC_STORAGE_NAME},subnet=${SUBNET_STORAGE_NAME},no-address")
+             fi
         fi
 
         if ! gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${cp_name}$"; then

@@ -20,13 +20,28 @@ HELM_VERSION="${HELM_VERSION:-v3.16.2}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.18.6}"
 TRAEFIK_VERSION="${TRAEFIK_VERSION:-38.0.2}"
 
+# Rook Ceph Defaults
+ROOK_ENABLE="${ROOK_ENABLE:-false}"
+ROOK_CHART_VERSION="${ROOK_CHART_VERSION:-v1.18.9}"
+ROOK_MDS_CPU="${ROOK_MDS_CPU:-3}"           # Default: Production (Recommended)
+ROOK_MDS_MEMORY="${ROOK_MDS_MEMORY:-4Gi}"   # Default: Production (Recommended)
+ROOK_OSD_CPU="${ROOK_OSD_CPU:-1}"           # Default: 1 vCPU per OSD
+ROOK_OSD_MEMORY="${ROOK_OSD_MEMORY:-2Gi}"   # Default: 2Gi per OSD
+
 # Mixed Role Versions (Default to global TALOS_VERSION)
 CP_TALOS_VERSION="${CP_TALOS_VERSION:-$TALOS_VERSION}"
 WORKER_TALOS_VERSION="${WORKER_TALOS_VERSION:-$TALOS_VERSION}"
 
 # Extensions (Comma-separated, e.g. "siderolabs/gvisor,siderolabs/nvidia-container-toolkit")
+# Extensions (Comma-separated, e.g. "siderolabs/gvisor,siderolabs/nvidia-container-toolkit")
 CP_EXTENSIONS="${CP_EXTENSIONS:-}"
 WORKER_EXTENSIONS="${WORKER_EXTENSIONS:-}"
+POOL_EXTENSIONS="${POOL_EXTENSIONS:-$WORKER_EXTENSIONS}"
+
+# Kernel Args (Comma-separated or space-separated, e.g. "console=ttyS0,115200")
+CP_KERNEL_ARGS="${CP_KERNEL_ARGS:-}"
+WORKER_KERNEL_ARGS="${WORKER_KERNEL_ARGS:-}"
+POOL_KERNEL_ARGS="${POOL_KERNEL_ARGS:-$WORKER_KERNEL_ARGS}"
 
 # Network
 VPC_NAME="${VPC_NAME:-${CLUSTER_NAME}-vpc}"
@@ -39,40 +54,18 @@ STORAGE_CIDR="${STORAGE_CIDR:-}"
 
 # Compute
 CP_MACHINE_TYPE="${CP_MACHINE_TYPE:-e2-standard-2}"
+CP_USE_STORAGE_NETWORK="${CP_USE_STORAGE_NETWORK:-false}"
 
 # Worker Configuration
-WORKER_MACHINE_TYPE="${WORKER_MACHINE_TYPE:-e2-standard-2}"
-
-# If "custom" is specified, we require VCPU and MEMORY config
-WORKER_VCPU="${WORKER_VCPU:-}"
-WORKER_MEMORY_GB="${WORKER_MEMORY_GB:-}"
-WORKER_MACHINE_FAMILY="${WORKER_MACHINE_FAMILY:-n2}" # Default to N2
-
-if [ "${WORKER_MACHINE_TYPE}" == "custom" ]; then
-    if [ -n "$WORKER_VCPU" ] && [ -n "$WORKER_MEMORY_GB" ]; then
-        # Verify values are integers
-        if ! [[ "$WORKER_VCPU" =~ ^[0-9]+$ ]] || ! [[ "$WORKER_MEMORY_GB" =~ ^[0-9]+$ ]]; then
-            error "WORKER_VCPU and WORKER_MEMORY_GB must be integers when using custom machine type."
-            exit 1
-        fi
-        # Convert GB to MB
-        WORKER_MEMORY_MB=$((WORKER_MEMORY_GB * 1024))
-        # Construct: FAMILY-custom-VCPU-MEM
-        WORKER_MACHINE_TYPE="${WORKER_MACHINE_FAMILY}-custom-${WORKER_VCPU}-${WORKER_MEMORY_MB}"
-    else
-        error "WORKER_MACHINE_TYPE is set to 'custom' but WORKER_VCPU or WORKER_MEMORY_GB is missing."
-        exit 1
-    fi
-elif [[ -n "$WORKER_VCPU" || -n "$WORKER_MEMORY_GB" ]]; then
-     # Warn if VCPU/Memory are set but ignored
-     warn "WORKER_VCPU/WORKER_MEMORY_GB are set but ignored because WORKER_MACHINE_TYPE is not 'custom'."
-     warn "Current Machine Type: ${WORKER_MACHINE_TYPE}"
-fi
 CP_DISK_SIZE="${CP_DISK_SIZE:-200GB}"
-WORKER_DISK_SIZE="${WORKER_DISK_SIZE:-200GB}"
 CP_COUNT="${CP_COUNT:-1}"
-WORKER_COUNT="${WORKER_COUNT:-1}"
-WORKER_ADDITIONAL_DISKS="${WORKER_ADDITIONAL_DISKS:-}"
+# Worker defaults are now handled per-pool in workers.sh or via POOL_* vars
+
+# Default to single "worker" pool if NODE_POOLS is unset (Implicit Default)
+if [ -z "${NODE_POOLS:-}" ]; then
+    NODE_POOLS=("worker")
+fi
+
 
 # Features
 INSTALL_CILIUM="${INSTALL_CILIUM:-true}"
@@ -117,8 +110,10 @@ if [ -z "${WORK_HOURS_TIMEZONE:-}" ]; then
 fi
 export WORK_HOURS_TIMEZONE
 
-# Labels (Default: Empty)
-LABELS="${LABELS:-}"
+# Peering Configuration (Default: Empty)
+PEER_WITH=()
+
+
 # Check & Default CLUSTER_NAME
 check_cluster_name() {
     if [ -z "${CLUSTER_NAME:-}" ]; then

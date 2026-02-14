@@ -7,7 +7,7 @@ apply() {
     check_dependencies || return 1
     
     log "Updating Cluster Configuration..."
-    log "Target Worker Count: ${WORKER_COUNT}"
+    log "Node Pools: ${NODE_POOLS[*]}"
     
     # Ensure Output Directory exists (Critical for generated files)
     mkdir -p "${OUTPUT_DIR}"
@@ -18,8 +18,14 @@ apply() {
     # Reconcile Networking (Firewall Rules, etc.) - Allows Day 2 updates
     provision_networking || return 1
     
+    # Ensure Configs exist (for worker scaling/updates)
+    generate_talos_configs || return 1
+    
     # Reconcile Workers (Create missing, Prune extra)
     provision_workers || return 1
+    
+    # 2b. Apply Node Pool Labels/Taints
+    apply_node_pool_labels
     
     # Update Schedule (Work Hours)
     update_schedule
@@ -120,6 +126,13 @@ provision_resources() {
     fi
 }
 
+provision_peering() {
+    log "Phase 2b: Reconciling VPC Peering..."
+    # Always run to handle cleanup of stale peerings even if PEER_WITH is empty
+    source "${SCRIPT_DIR}/lib/peering.sh"
+    reconcile_peering || return 1
+}
+
 deploy_all() {
     set_names
     check_dependencies || return 1
@@ -129,6 +142,9 @@ deploy_all() {
     
     # 2. Infrastructure (Networking & Control Plane)
     provision_controlplane_infra || return 1 
+    
+    # 2b. VPC Peering (Multi-Cluster)
+    provision_peering || return 1
     
     # 3. Bastion Creation
     provision_bastion || return 1
@@ -150,8 +166,27 @@ deploy_all() {
     
     # 9. Workers (Created only AFTER CNI is ready)
     provision_workers || return 1
+
+    # 9b. Apply Node Pool Labels/Taints
+    # We do this after provisioning, though nodes might not be ready instantly.
+    # The function handles "No nodes found" gracefully.
+    apply_node_pool_labels
+    
+    # 9c. Rook Ceph (Optional - Automation coverage)
+    # 1. Rook Host Cluster (Server)
+    if [ "${ROOK_ENABLE}" == "true" ]; then
+        source "${SCRIPT_DIR}/lib/rook.sh"
+        deploy_rook || return 1
+    fi
+
+    # 2. Rook Client Cluster
+    if [[ " ${PEER_WITH[@]} " =~ " rook-ceph " ]]; then
+        source "${SCRIPT_DIR}/lib/rook-external.sh"
+        deploy_rook_client || return 1
+    fi
     
     # 10. Finalize Bastion (Sync /etc/skel)
+    
     finalize_bastion_config || return 1
     
     # Update Schedule (Work Hours)
@@ -224,6 +259,15 @@ cleanup() {
     gcloud compute health-checks delete -q "${HC_WORKER_UDP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" || true
     
     gcloud compute instance-groups unmanaged delete -q "${IG_WORKER_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" || true
+    
+    # Custom Pool IGs
+    if [ -n "${NODE_POOLS:-}" ]; then
+        for pool in "${NODE_POOLS[@]}"; do
+            local safe_pool="${pool//-/_}"
+            local ig_name="${CLUSTER_NAME}-ig-${pool}"
+            gcloud compute instance-groups unmanaged delete -q "${ig_name}" --zone "${ZONE}" --project="${PROJECT_ID}" || true
+        done
+    fi
 
     # 3. Cleanup Control Plane (Internal LB)
     log "Cleaning up Control Plane Resources..."
@@ -302,6 +346,17 @@ cleanup() {
     gcloud compute routers nats delete -q "${NAT_NAME}" --router "${ROUTER_NAME}" --region "${REGION}" --project="${PROJECT_ID}" || true
     gcloud compute routers delete -q "${ROUTER_NAME}" --region "${REGION}" --project="${PROJECT_ID}" || true
     
+    # Delete VPC Peerings (Must be done before deleting VPC)
+    log "Cleaning up VPC Peerings..."
+    local PEERINGS
+    PEERINGS=$(gcloud compute networks peerings list --network="${VPC_NAME}" --project="${PROJECT_ID}" --format="value(name)" 2>/dev/null)
+    if [ -n "$PEERINGS" ]; then
+        for peering in $PEERINGS; do
+            log "  - Deleting peering '${peering}'..."
+            run_safe gcloud compute networks peerings delete "${peering}" --network="${VPC_NAME}" --project="${PROJECT_ID}" --quiet || warn "Failed to delete peering '${peering}'."
+        done
+    fi
+
     if ! gcloud compute networks subnets delete -q "${SUBNET_NAME}" --region "${REGION}" --project="${PROJECT_ID}"; then
         warn "Could not delete Subnet."
     fi

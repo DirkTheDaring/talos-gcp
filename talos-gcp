@@ -3,7 +3,7 @@
 # Talos GCP Deployment Script
 # Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
 
-set -x
+#set -x
 
 set -euo pipefail
 
@@ -284,6 +284,18 @@ case "$COMMAND" in
         set_names
         check_dependencies
         update_schedule
+        ;;
+    install-ceph-client)
+        set_names
+        check_dependencies
+        source "${SCRIPT_DIR}/lib/rook.sh"
+        install_ceph_client
+        ;;
+    update-rook-ceph)
+        set_names
+        check_dependencies
+        source "${SCRIPT_DIR}/lib/rook.sh"
+        deploy_rook
         ;;
     orphans)
         set_names

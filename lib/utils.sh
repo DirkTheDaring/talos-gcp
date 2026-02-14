@@ -142,6 +142,25 @@ ensure_instance_in_ig() {
     fi
 }
 
+# Run command on Bastion (Tunnel Support)
+run_on_bastion() {
+    local cmd="$1"
+    
+    # Execute
+    # -q: Quiet
+    # -o StrictHostKeyChecking=no: Prevent prompt
+    # --tunnel-through-iap: Enable access for private instances
+    if ! gcloud compute ssh "${BASTION_NAME}" \
+        --zone "${ZONE}" \
+        --project="${PROJECT_ID}" \
+        --tunnel-through-iap \
+        --command "${cmd}" \
+        -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null; then
+        warn "Failed to execute command on bastion. (Bastion might be down or not reachable via IAP)"
+        return 1
+    fi
+}
+
 ensure_service_account() {
     log "Ensuring Service Account exists and has roles..."
     
@@ -206,15 +225,7 @@ check_apis() {
 check_quotas() {
     log "Checking Quotas in ${REGION}..."
     
-    # 1. Calculate Required CPUs
-    local REQUIRED_CPUS_TOTAL=0
-    local REQUIRED_N2_CPUS=0
-    
-    # Bastion (e2-micro/small ~ 2 vCPU safe estimate)
-    REQUIRED_CPUS_TOTAL=$((REQUIRED_CPUS_TOTAL + 2))
-
-    # Control Plane
-    # helper to extract vcpu count from machine type string
+    # Helper: Extract vCPU count from machine type string
     get_vcpu_count() {
         local mt="$1"
         if [[ "$mt" =~ custom-([0-9]+)- ]]; then
@@ -225,34 +236,115 @@ check_quotas() {
              echo "${BASH_REMATCH[1]}"
         elif [[ "$mt" =~ highcpu-([0-9]+) ]]; then
              echo "${BASH_REMATCH[1]}"
+        elif [[ "$mt" =~ (micro|small|medium) ]]; then
+             echo "2" # e2-micro/small/medium often report 2 shared vCPUs
         else
-             # Default fallback for unknown standard types (e.g. e2-medium=2)
-             echo "2" 
+             echo "2" # Default fallback
         fi
     }
 
+    # Helper: Determine Quota Metric Family (e.g. N2_CPUS)
+    # Returns "CPUS" (Global) or specific family metric (e.g., N2_CPUS)
+    get_quota_metric() {
+        local mt="$1"
+        local family="$2"
+
+        # Explicit Family Override (for custom types or when explicitly set)
+        if [[ -n "$family" ]]; then
+            case "${family,,}" in
+                e2|n1|f1|g1) echo "CPUS" ;;
+                *) echo "${family^^}_CPUS" ;;
+            esac
+            return
+        fi
+
+        # Inferred from Standard Type
+        case "$mt" in
+            n2-*)  echo "N2_CPUS" ;;
+            n2d-*) echo "N2D_CPUS" ;;
+            c2-*)  echo "C2_CPUS" ;;
+            c2d-*) echo "C2D_CPUS" ;;
+            t2d-*) echo "T2D_CPUS" ;;
+            t2a-*) echo "T2A_CPUS" ;;
+            m1-*)  echo "M1_CPUS" ;;
+            m2-*)  echo "M2_CPUS" ;;
+            a2-*)  echo "A2_CPUS" ;;
+            c3-*)  echo "C3_CPUS" ;;
+            c3d-*) echo "C3D_CPUS" ;;
+            *)     echo "CPUS" ;; # E2, N1, F1, G1 fall under standard/global CPUS usually
+        esac
+    }
+
+    # Tracking Variables (Associative Array for Family Metrics)
+    # We use declare -A if available, otherwise fallback to explicit variables?
+    # Bash 4.0+ has associative arrays. Talos scripts assume modern bash environment.
+    declare -A REQUIRED_METRICS
+    REQUIRED_METRICS["CPUS"]=0
+
+    # --- 1. Bastion ---
+    # e2-micro/small ~ 2 vCPU (Standard CPUS)
+    REQUIRED_METRICS["CPUS"]=$((REQUIRED_METRICS["CPUS"] + 2))
+
+    # --- 2. Control Plane ---
     local cp_vcpu
     cp_vcpu=$(get_vcpu_count "${CP_MACHINE_TYPE}")
-    REQUIRED_CPUS_TOTAL=$((REQUIRED_CPUS_TOTAL + (cp_vcpu * CP_COUNT)))
+    local cp_metric
+    cp_metric=$(get_quota_metric "${CP_MACHINE_TYPE}")
     
-    # Check if CP is N2
-    if [[ "${CP_MACHINE_TYPE}" == n2-* ]]; then
-        REQUIRED_N2_CPUS=$((REQUIRED_N2_CPUS + (cp_vcpu * CP_COUNT)))
+    # Add to Total Global CPUS
+    REQUIRED_METRICS["CPUS"]=$((REQUIRED_METRICS["CPUS"] + (cp_vcpu * CP_COUNT)))
+    
+    # Add to Specific Family Metric (if not CPUS)
+    if [ "$cp_metric" != "CPUS" ]; then
+        if [ -z "${REQUIRED_METRICS[$cp_metric]}" ]; then REQUIRED_METRICS["$cp_metric"]=0; fi
+        REQUIRED_METRICS["$cp_metric"]=$((REQUIRED_METRICS["$cp_metric"] + (cp_vcpu * CP_COUNT)))
     fi
 
-    # Workers
-    local worker_vcpu
-    worker_vcpu=$(get_vcpu_count "${WORKER_MACHINE_TYPE}")
-    REQUIRED_CPUS_TOTAL=$((REQUIRED_CPUS_TOTAL + (worker_vcpu * WORKER_COUNT)))
+    # --- 3. Worker Node Pools ---
+    local pools=("${NODE_POOLS[@]}")
+    [ ${#pools[@]} -eq 0 ] && pools=("worker")
 
-    # Check if Worker is N2
-    if [[ "${WORKER_MACHINE_TYPE}" == n2-* ]]; then
-        REQUIRED_N2_CPUS=$((REQUIRED_N2_CPUS + (worker_vcpu * WORKER_COUNT)))
-    fi
-    
-    log "Required vCPUs: Total=${REQUIRED_CPUS_TOTAL}, N2=${REQUIRED_N2_CPUS}"
+    for pool in "${pools[@]}"; do
+        local safe_pool="${pool//-/_}"
+        local count_var="POOL_${safe_pool^^}_COUNT"
+        local type_var="POOL_${safe_pool^^}_TYPE"
+        local family_var="POOL_${safe_pool^^}_FAMILY"
+        local vcpu_var="POOL_${safe_pool^^}_VCPU"
+        
+        local count="${!count_var:-0}"
+        if [ "$count" -eq 0 ]; then continue; fi
 
-    # 2. Get Quota using jq
+        local mt="${!type_var:-e2-standard-2}"
+        local worker_vcpu
+        local worker_metric
+
+        # Handle Custom Type
+        if [ "$mt" == "custom" ]; then
+             local vcpu="${!vcpu_var:-2}"
+             worker_vcpu="$vcpu"
+             # Use explicit family variable if set, default to N2 (common for custom) if not.
+             local fam="${!family_var:-n2}"
+             worker_metric=$(get_quota_metric "" "$fam")
+        else
+             worker_vcpu=$(get_vcpu_count "${mt}")
+             worker_metric=$(get_quota_metric "${mt}")
+        fi
+
+        # Add to Totals
+        REQUIRED_METRICS["CPUS"]=$((REQUIRED_METRICS["CPUS"] + (worker_vcpu * count)))
+        
+        if [ "$worker_metric" != "CPUS" ]; then
+            if [ -z "${REQUIRED_METRICS[$worker_metric]}" ]; then REQUIRED_METRICS["$worker_metric"]=0; fi
+            REQUIRED_METRICS["$worker_metric"]=$((REQUIRED_METRICS["$worker_metric"] + (worker_vcpu * count)))
+        fi
+    done
+
+    # --- 4. Quota Check ---
+    log "Required vCPUs Summary:"
+    for metric in "${!REQUIRED_METRICS[@]}"; do
+        log "  - ${metric}: ${REQUIRED_METRICS[$metric]}"
+    done
+
     if ! command -v jq &> /dev/null; then warn "jq not found, skipping quota check."; return; fi
     
     local REGION_INFO
@@ -262,14 +354,12 @@ check_quotas() {
         warn "Could not read region info. Billing might be disabled or permissions missing."
         return
     fi
-
-    # Helper to check a specific metric
-    check_metric() {
+    
+    # Inner Helper Function to check a specific metric against the fetched JSON
+    check_single_metric() {
         local metric_name="$1"
         local required="$2"
         
-        [ "$required" -eq 0 ] && return 0
-
         local available
         available=$(echo "$REGION_INFO" | jq -r --arg metric "$metric_name" '
             ([.quotas[] | select(.metric == $metric)][0] | .limit // 0) as $limit |
@@ -277,7 +367,10 @@ check_quotas() {
             ($limit - $usage) | floor
         ')
         
-        log "Quota '${metric_name}': Available=${available}, Required=${required}"
+        # Handle cases where metric is not present (jq returns null)
+        if [ "$available" == "null" ] || [ -z "$available" ]; then available=0; fi
+        
+        log "  > Quota '${metric_name}': Available=${available}, Required=${required}"
         
         if [ "$available" -lt "$required" ]; then
             error "Insufficient '${metric_name}' Quota in ${REGION}."
@@ -287,13 +380,13 @@ check_quotas() {
         fi
     }
 
-    # Check Global CPUS (Standard)
-    check_metric "CPUS" "$REQUIRED_CPUS_TOTAL" || exit 1
-    
-    # Check N2 CPUS if needed
-    if [ "$REQUIRED_N2_CPUS" -gt 0 ]; then
-         check_metric "N2_CPUS" "$REQUIRED_N2_CPUS" || exit 1
-    fi
+    # Iterate and Check
+    for metric in "${!REQUIRED_METRICS[@]}"; do
+        local required="${REQUIRED_METRICS[$metric]}"
+        if [ "$required" -gt 0 ]; then
+             check_single_metric "$metric" "$required" || exit 1
+        fi
+    done
     
     log "✅ Quota check passed."
 }

@@ -1,150 +1,392 @@
 #!/bin/bash
 
-provision_workers() {
-    log "Phase 10: Workers & Ingress..."
-    # Rely on global variables from set_names
-   
-    
-    # 1. Instance Group (Worker)
-    if ! gcloud compute instance-groups unmanaged describe "${IG_WORKER_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
-        run_safe gcloud compute instance-groups unmanaged create "${IG_WORKER_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}"
-    fi
 
-    # Create/Update Ingress Resources
-    apply_ingress
+# Generic Node Pool Provisioning
+provision_node_pools() {
+    log "Phase 10: Provisioning Node Pools..."
 
-    # 3. Create Worker Instances
-    for ((i=0; i<${WORKER_COUNT}; i++)); do
-        create_worker_instance "${CLUSTER_NAME}-worker-$i"
+    for pool in "${NODE_POOLS[@]}"; do
+        provision_pool "${pool}"
     done
-    # 4. Prune Extra Workers
-    prune_workers
 }
 
-create_worker_instance() {
-    local worker_name="$1"
+provision_pool() {
+    local pool_name="$1"
+    log "Provisioning Node Pool: ${pool_name}..."
+
+    # 1. Resolve Pool Configuration (Dynamic Variables)
+    # Sanitize pool name for variable lookup (replace - with _)
+    local safe_pool_name="${pool_name//-/_}"
+    local pool_count_var="POOL_${safe_pool_name^^}_COUNT"
+    local pool_type_var="POOL_${safe_pool_name^^}_TYPE"
+    local pool_size_var="POOL_${safe_pool_name^^}_DISK_SIZE"
+    local pool_image_var="POOL_${safe_pool_name^^}_IMAGE"
+    local pool_labels_var="POOL_${safe_pool_name^^}_LABELS"
+    local pool_taints_var="POOL_${safe_pool_name^^}_TAINTS"
+    local pool_ext_var="POOL_${safe_pool_name^^}_EXTENSIONS"
+    local pool_disks_var="POOL_${safe_pool_name^^}_ADDITIONAL_DISKS"
+    local pool_storage_net_var="POOL_${safe_pool_name^^}_USE_STORAGE_NET"
+
+    local pool_vcpu_var="POOL_${safe_pool_name^^}_VCPU"
+    local pool_mem_var="POOL_${safe_pool_name^^}_MEMORY_GB"
+    local pool_family_var="POOL_${safe_pool_name^^}_FAMILY"
+
+    local count="${!pool_count_var:-0}"
+    local machine_type="${!pool_type_var:-e2-medium}" 
+    local disk_size="${!pool_size_var:-200GB}"
+    local install_image="${!pool_image_var:-}"
+    local labels="${!pool_labels_var:-}"
+    local taints="${!pool_taints_var:-}"
+    local extensions="${!pool_ext_var:-$POOL_EXTENSIONS}"
+    local additional_disks="${!pool_disks_var:-}"
+    local use_storage_net="${!pool_storage_net_var:-false}"
     
+    local pool_kargs_var="POOL_${safe_pool_name^^}_KERNEL_ARGS"
+    local kernel_args="${!pool_kargs_var:-$POOL_KERNEL_ARGS}"
+
+
+
+    # Handle Custom Machine Types for Pools
+    if [ "${machine_type}" == "custom" ]; then
+        local vcpu="${!pool_vcpu_var:-}"
+        local mem_gb="${!pool_mem_var:-}"
+        local family="${!pool_family_var:-n2}" # Default family for pools
+        
+        if [ -n "$vcpu" ] && [ -n "$mem_gb" ]; then
+             if ! [[ "$vcpu" =~ ^[0-9]+$ ]] || ! [[ "$mem_gb" =~ ^[0-9]+$ ]]; then
+                error "Pool '${pool_name}': VCPU and MEMORY_GB must be integers for custom type."
+                exit 1
+             fi
+             local mem_mb=$((mem_gb * 1024))
+             machine_type="${family}-custom-${vcpu}-${mem_mb}"
+             log "  > Pool '${pool_name}' using custom type: ${machine_type}"
+        else
+             error "Pool '${pool_name}' set to 'custom' but VCPU or MEMORY_GB is missing."
+             exit 1
+        fi
+    fi
+
+    log "  > Pool '${pool_name}': Count=${count}, Type=${machine_type}, StorageNet=${use_storage_net}"
+
+    if [ "$count" -eq 0 ]; then
+        log "  > Skipping empty pool '${pool_name}'."
+        return
+    fi
+
+    # 2. Instance Group (Per Pool)
+    # Naming convention: {CLUSTER_NAME}-ig-{pool_name}
+    local ig_name="${CLUSTER_NAME}-ig-${pool_name}"
+    
+    if ! gcloud compute instance-groups unmanaged describe "${ig_name}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
+        run_safe gcloud compute instance-groups unmanaged create "${ig_name}" --zone "${ZONE}" --project="${PROJECT_ID}"
+    fi
+
+    # 3. Generate Pool-Specific Config (worker-${pool}.yaml)
+    # We generate a specific config for this pool to inject Labels and Taints at boot time.
+    # This avoids the race condition where nodes join before taints are applied.
+    local pool_config="${OUTPUT_DIR}/worker-${pool_name}.yaml"
+    
+    # We use the generic 'worker.yaml' as base.
+    if [ ! -f "${OUTPUT_DIR}/worker.yaml" ]; then
+        warn "Base 'worker.yaml' not found. Skipping pool config generation (dependent on Phase 5)."
+        pool_config="${OUTPUT_DIR}/worker.yaml" # Fallback
+    else
+        log "Generating config for pool '${pool_name}' with Labels='${labels}' Taints='${taints}' StorageNet='${use_storage_net}'..."
+        run_safe python3 "${BASH_SOURCE[0]%/*}/../gen_pool_config.py" "${OUTPUT_DIR}/worker.yaml" "${pool_config}" "${labels}" "${taints}" "${use_storage_net}"
+    fi
+
+    # 4. Resolve Image Name for this Pool
+    # We need to replicate the hashing logic from lib/images.sh to know which image to usage.
+    # Alternatively, we could export a map, but bash maps are tricky across subshells.
+    # Re-implementing the safe suffix logic here is robust.
+    
+    local image_to_use=""
+    if [ -n "${install_image}" ]; then
+        image_to_use="${install_image}"
+    else
+        # Default logic
+        local safe_ver="${WORKER_TALOS_VERSION//./-}" # sanitize_version
+        safe_ver=$(echo "${safe_ver}" | tr '[:upper:]' '[:lower:]')
+        
+        local suffix="gcp-${ARCH}"
+        if [ -n "${extensions}" ] || [ -n "${kernel_args}" ]; then
+             local normalized_ext
+             normalized_ext=$(echo "${extensions}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort | tr '\n' ',' | sed 's/,$//')
+             
+             local normalized_kargs
+             normalized_kargs=$(echo "${kernel_args}" | tr ' ' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort | tr '\n' ',' | sed 's/,$//')
+     
+             local ext_hash
+             ext_hash=$(echo "${normalized_ext}|${normalized_kargs}" | md5sum | cut -c1-8)
+             suffix="worker-${ext_hash}-${ARCH}"
+        fi
+        image_to_use="talos-${safe_ver}-${suffix}"
+    fi
+
+    # 5. Create Instances
+    for ((i=0; i<count; i++)); do
+        local instance_name="${CLUSTER_NAME}-${pool_name}-${i}"
+        
+        create_node_instance \
+            "${instance_name}" \
+            "${machine_type}" \
+            "${disk_size}" \
+            "${ig_name}" \
+            "${use_storage_net}" \
+            "${additional_disks}" \
+            "${labels}" \
+            "${taints}" \
+            "${pool_config}" \
+            "${image_to_use}"
+    done
+
+    # 5. Prune Pool
+    prune_pool "${pool_name}" "${count}" "${ig_name}"
+    
+    # 6. Attach to Ingress Backend Services (Only for 'worker' pool for now?)
+    # If we want generic Ingress, we might need a "POOL_EXPOSE_INGRESS" flag.
+    # For backward compatibility, strictly 'worker' pool is attached to existing BEs.
+    if [ "$pool_name" == "worker" ]; then
+         attach_worker_ig_to_bes "${ig_name}"
+    fi
+}
+
+create_node_instance() {
+    local instance_name="$1"
+    local machine_type="$2"
+    local disk_size="$3"
+    local ig_name="$4"
+    local use_storage_net="$5"
+    local additional_disks="$6"
+    local labels="$7"
+    local taints="$8" # Currently unused in gcloud create (for labels), but used in config generation.
+    local custom_config="${9:-}" # Optional custom config file path
+    local image_arg="${10:-}"
+
+    # Image Resolution (if not explicitly passed)
+    local target_image="${image_arg}"
+    
+    if [ -z "$target_image" ]; then
+        # We try to fall back to WORKER_IMAGE_NAME
+        target_image="${WORKER_IMAGE_NAME}"
+    fi
+
     # Build Disk Flags
     local -a DISK_FLAGS
-    if [ -n "${WORKER_ADDITIONAL_DISKS:-}" ]; then
+    if [ -n "${additional_disks:-}" ]; then
         local disk_index=0
-        for disk_def in ${WORKER_ADDITIONAL_DISKS}; do
+        for disk_def in ${additional_disks}; do
             IFS=':' read -r dtype dsize dname <<< "${disk_def}"
             
-            # Validation: Must have at least type and size
+            # Validation
             if [[ -z "$dtype" || -z "$dsize" ]]; then
-                error "Invalid WORKER_ADDITIONAL_DISKS definition: '${disk_def}'. Format: type:size[:device-name]"
+                error "Invalid Disk Definition in pool: '${disk_def}'. Format: type:size[:device-name]"
                 exit 1
             fi
 
             [ -z "${dname}" ] && dname="disk-${disk_index}"
-            local gcp_disk_name="${worker_name}-disk-${disk_index}"
+            local gcp_disk_name="${instance_name}-disk-${disk_index}"
             DISK_FLAGS+=("--create-disk=name=${gcp_disk_name},size=${dsize},type=${dtype},device-name=${dname},mode=rw,auto-delete=yes")
             ((disk_index++))
         done
-        log "Adding disks to ${worker_name}: ${DISK_FLAGS[*]}"
+        log "For ${instance_name}: Adding ${#DISK_FLAGS[@]} additional disks."
     fi
 
-    # Workaround: gcloud filter hangs.
-    # Prepare Network Interface Flags
+    # Network Flags
     local ALIAS_FLAG=""
     if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
-        # Format: RANGE_NAME:CIDR_LENGTH (e.g. pods:/24)
-        log "Native Routing: Requesting Alias IP from 'pods' range for ${worker_name}..."
         ALIAS_FLAG=",aliases=pods:/24"
     fi
 
     local -a NETWORK_FLAGS
-    # NIC0: Primary (Cluster Network)
-    # MUST use --network-interface if mixing with --network-interface for nic1
+    # NIC0: Primary
     NETWORK_FLAGS=("--network-interface" "network=${VPC_NAME},subnet=${SUBNET_NAME},no-address${ALIAS_FLAG}")
     
-    # NIC1: Storage Network (Optional)
-    if [ -n "${STORAGE_CIDR:-}" ]; then
-            NETWORK_FLAGS+=("--network-interface" "network=${VPC_STORAGE_NAME},subnet=${SUBNET_STORAGE_NAME},no-address")
+    # NIC1: Storage (Conditional)
+    if [ -n "${STORAGE_CIDR:-}" ] && [ "${use_storage_net}" == "true" ]; then
+         NETWORK_FLAGS+=("--network-interface" "network=${VPC_STORAGE_NAME},subnet=${SUBNET_STORAGE_NAME},no-address")
     fi
 
-    if gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${worker_name}$"; then
-         # Check for Drift (Machine Type)
+    # Check Existence & Drift
+    if gcloud compute instances list --zones "${ZONE}" --format="value(name)" --project="${PROJECT_ID}" | grep -q "^${instance_name}$"; then
+         # Check Machine Type Drift
          local current_mt
-         current_mt=$(gcloud compute instances describe "${worker_name}" --zone "${ZONE}" --project="${PROJECT_ID}" --format="value(machineType)" 2>/dev/null)
-         # Extract basename
+         current_mt=$(gcloud compute instances describe "${instance_name}" --zone "${ZONE}" --project="${PROJECT_ID}" --format="value(machineType)" 2>/dev/null)
          current_mt="${current_mt##*/}"
          
-         if [ "$current_mt" != "${WORKER_MACHINE_TYPE}" ]; then
-             warn "Worker ${worker_name} exists but has machine type '${current_mt}' (Expected: '${WORKER_MACHINE_TYPE}')."
-             warn "To apply the new machine type, you must recreate the worker:"
-             warn "  ./talos-gcp prune-worker ${worker_name} (Conceptual command, manually delete for now)"
-             warn "  gcloud compute instances delete ${worker_name} --zone ${ZONE}"
+         if [ "$current_mt" != "${machine_type}" ]; then
+             warn "Node ${instance_name} exists but has type '${current_mt}' (Expected: '${machine_type}')."
+             warn "Manual recreation required to apply machine type change."
          else
-             log "Worker ${worker_name} exists and matches configuration."
-             
-             # Native Routing Drift Check
-             if [ "${CILIUM_ROUTING_MODE:-}" == "native" ]; then
-                 local aliases
-                 aliases=$(gcloud compute instances describe "${worker_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null)
-                 if [ -z "$aliases" ]; then
-                     warn "Worker ${worker_name} is MISSING Alias IPs required for Native Routing."
-                     warn "Run 'gcloud compute instances delete ${worker_name} --zone ${ZONE}' and re-run apply to fix."
-                 fi
-             fi
+             log "Node ${instance_name} exists and matches configuration."
+             ensure_instance_in_ig "${instance_name}" "${ig_name}"
          fi
     else
-         log "Creating worker node (${worker_name})..."
-         run_safe retry gcloud compute instances create "${worker_name}" \
-            --image "${WORKER_IMAGE_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" \
-            --machine-type="${WORKER_MACHINE_TYPE}" --boot-disk-size="${WORKER_DISK_SIZE}" \
+         log "Creating node instance (${instance_name})..."
+         
+         # Construct GCP Labels
+         # Add generic cluster tags + user provided pool labels (if formatted correctly for GCP)
+         # For simplicity, we just add the standard set + list labels in description or metadata?
+         # GCP Labels must be key=val, lowercase.
+         local gcp_labels="cluster=${CLUSTER_NAME},talos-version=${WORKER_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}"
+         
+         # Convert env labels (role=storage) to GCP labels (role=storage) if compatible
+         if [ -n "$labels" ]; then
+             # Simple sanitization or direct append if trusted
+             gcp_labels="${gcp_labels},${labels// /_}" 
+         fi
+
+         run_safe retry gcloud compute instances create "${instance_name}" \
+            --image "${target_image}" --zone "${ZONE}" --project="${PROJECT_ID}" \
+            --machine-type="${machine_type}" --boot-disk-size="${disk_size}" \
             "${NETWORK_FLAGS[@]}" \
             --service-account="${WORKER_SERVICE_ACCOUNT}" --scopes cloud-platform \
-            --tags "talos-worker,${worker_name}" \
-            --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${WORKER_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
-            --metadata-from-file=user-data="${OUTPUT_DIR}/worker.yaml" \
+            --tags "talos-worker,${CLUSTER_NAME}-worker,${instance_name}" \
+            --labels="${gcp_labels}" \
+            --metadata-from-file=user-data="${custom_config:-${OUTPUT_DIR}/worker.yaml}" \
             "${DISK_FLAGS[@]}"
+            
+         ensure_instance_in_ig "${instance_name}" "${ig_name}"
     fi
-    ensure_instance_in_ig "${worker_name}" "${IG_WORKER_NAME}"
 }
 
-prune_workers() {
-    log "Checking for extra worker nodes to prune (Target: ${WORKER_COUNT})..."
-    # List all worker nodes for this cluster
-    local existing_workers
-    existing_workers=$(gcloud compute instances list --filter="name~'${CLUSTER_NAME}-worker-.*' AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
+prune_pool() {
+    local pool_name="$1"
+    local target_count="$2"
+    local ig_name="$3"
     
-    for instance in $existing_workers; do
-        # Parse index from name (assuming ${CLUSTER_NAME}-worker-N)
-        local prefix="${CLUSTER_NAME}-worker-"
-        local suffix="${instance#$prefix}"
-        
-        # Check if suffix is a number
-        if [[ "$suffix" =~ ^[0-9]+$ ]]; then
-            if (( suffix >= WORKER_COUNT )); then
-                log "Found extra worker node: ${instance} (Index ${suffix} >= ${WORKER_COUNT})..."
-                
-                # Check for confirmation
-                if [ "${CONFIRM_CHANGES:-true}" == "true" ]; then
-                    read -p "Are you sure you want to DELETE ${instance}? [y/N] " -r
-                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                        log "Skipping deletion of ${instance}."
-                        continue
-                    fi
-                else
-                     log "Auto-confirming deletion of ${instance} (Non-interactive mode)."
-                fi
+    local prefix="${CLUSTER_NAME}-${pool_name}-"
+    
+    log "Pruning pool '${pool_name}' (Target: ${target_count})..."
+    local existing
+    existing=$(gcloud compute instances list --filter="name~'${prefix}.*' AND zone:(${ZONE})" --format="value(name)" --project="${PROJECT_ID}")
 
-                # 1. Remove from Instance Group (idempotent-ish, ignore error if not found)
-                if gcloud compute instance-groups unmanaged list-instances "${IG_WORKER_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" | grep -q "${instance}"; then
-                     log "Removing ${instance} from Instance Group ${IG_WORKER_NAME}..."
-                     run_safe gcloud compute instance-groups unmanaged remove-instances "${IG_WORKER_NAME}" \
-                        --instances="${instance}" --zone "${ZONE}" --project="${PROJECT_ID}"
+    for instance in $existing; do
+        local suffix="${instance#$prefix}"
+        if [[ "$suffix" =~ ^[0-9]+$ ]]; then
+            if (( suffix >= target_count )); then
+                if [ "${CONFIRM_CHANGES:-true}" == "true" ]; then
+                    read -p "Delete extra node ${instance}? [y/N] " -r
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then continue; fi
                 fi
                 
-                # 2. Delete Instance
-                log "Deleting instance ${instance}..."
+                # Remove from IG & Delete
+                run_safe gcloud compute instance-groups unmanaged remove-instances "${ig_name}" --instances="${instance}" --zone "${ZONE}" --project="${PROJECT_ID}" || true
                 run_safe gcloud compute instances delete "${instance}" --zone "${ZONE}" --project="${PROJECT_ID}" --quiet
-                log "Node ${instance} deleted."
-            else
-                log "Keeping worker node: ${instance} (Index ${suffix} < ${WORKER_COUNT})"
+                log "Deleted ${instance}."
             fi
         fi
     done
+}
+
+
+attach_worker_ig_to_bes() {
+    local ig_name="$1"
+    log "Attaching ${ig_name} to Ingress Backend Services..."
+    
+    # TCP Backend
+    if ! gcloud compute backend-services describe "${BE_WORKER_NAME}" --region "${REGION}" --project="${PROJECT_ID}" | grep -q "group: .*${ig_name}"; then
+         run_safe gcloud compute backend-services add-backend "${BE_WORKER_NAME}" --region "${REGION}" --instance-group "${ig_name}" --instance-group-zone "${ZONE}" --project="${PROJECT_ID}"
+    fi
+     # UDP Backend
+    if ! gcloud compute backend-services describe "${BE_WORKER_UDP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" | grep -q "group: .*${ig_name}"; then
+         run_safe gcloud compute backend-services add-backend "${BE_WORKER_UDP_NAME}" --region "${REGION}" --instance-group "${ig_name}" --instance-group-zone "${ZONE}" --project="${PROJECT_ID}"
+    fi
+}
+
+
+apply_node_pool_labels() {
+    log "Applying Node Pool Labels & Taints..."
+    export KUBECONFIG="${OUTPUT_DIR}/kubeconfig"
+    
+    local KUBECTL_CMD="kubectl"
+    local EXEC_MODE="local"
+    
+    # 1. Check Local Connectivity
+    if ! kubectl get nodes &>/dev/null; then
+        warn "Local kubectl unreachable (likely Private Cluster). Switching to Bastion execution..."
+        EXEC_MODE="bastion"
+        
+        # Upload config to ensure we have the right credentials
+        log "Uploading kubeconfig to Bastion..."
+        if ! gcloud compute scp "${OUTPUT_DIR}/kubeconfig" "${BASTION_NAME}:~/kubeconfig.pool" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --quiet; then
+            error "Failed to upload kubeconfig to bastion."
+            return 1
+        fi
+        
+        KUBECTL_CMD="kubectl --kubeconfig ~/kubeconfig.pool"
+    fi
+
+    for pool in "${NODE_POOLS[@]}"; do
+        local pool_name="${pool}"
+        local safe_pool_name="${pool_name//-/_}"
+        
+        local pool_labels_var="POOL_${safe_pool_name^^}_LABELS"
+        local pool_taints_var="POOL_${safe_pool_name^^}_TAINTS"
+        local labels="${!pool_labels_var:-}"
+        local taints="${!pool_taints_var:-}"
+        
+        if [ -z "$labels" ] && [ -z "$taints" ]; then continue; fi
+        
+        log "  > Pool '${pool}': Applying Labels='${labels}', Taints='${taints}'"
+        
+        # Get Nodes (Wait for them to join)
+        local nodes=""
+        local grep_pattern="${CLUSTER_NAME}-${pool}-[0-9]+$"
+        local max_attempts=30 # 5 minutes (30 * 10s)
+        local attempt=1
+        
+        while [ $attempt -le $max_attempts ]; do
+            if [ "$EXEC_MODE" == "local" ]; then
+                nodes=$(kubectl get nodes -o name 2>/dev/null | grep -E "$grep_pattern" || true)
+            else
+                # Run via Bastion
+                local remote_output
+                remote_output=$(run_on_bastion "${KUBECTL_CMD} get nodes -o name" || echo "")
+                nodes=$(echo "$remote_output" | grep -E "$grep_pattern" || true)
+            fi
+            
+            if [ -n "$nodes" ]; then
+                break
+            fi
+            
+            log "    Waiting for nodes in pool '${pool}' to register... ($attempt/$max_attempts)"
+            sleep 10
+            ((attempt++))
+        done
+        
+        if [ -z "$nodes" ]; then
+             warn "    Timeout waiting for nodes in pool '${pool}' to join. Labels NOT applied."
+             continue
+        fi
+        
+        for node in $nodes; do
+            node=${node#node/} # remove prefix
+            
+            # Prepare commands
+            local clean_labels="${labels//,/ }"
+            local clean_taints="${taints//,/ }"
+            
+            if [ -n "$labels" ]; then
+                if [ "$EXEC_MODE" == "local" ]; then
+                    run_safe kubectl label node "${node}" ${clean_labels} --overwrite
+                else
+                    run_on_bastion "${KUBECTL_CMD} label node ${node} ${clean_labels} --overwrite"
+                fi
+            fi
+            
+            if [ -n "$taints" ]; then
+                if [ "$EXEC_MODE" == "local" ]; then
+                    run_safe kubectl taint nodes "${node}" ${clean_taints} --overwrite
+                else
+                    run_on_bastion "${KUBECTL_CMD} taint nodes ${node} ${clean_taints} --overwrite"
+                fi
+            fi
+        done
+    done
+}
+
+# Alias for backward compatibility if called directly
+provision_workers() {
+    provision_node_pools
 }

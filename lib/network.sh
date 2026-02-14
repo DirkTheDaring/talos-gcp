@@ -136,7 +136,6 @@ provision_networking() {
             --allow=tcp:22 \
             --source-ranges=35.235.240.0/20 \
             --target-tags=bastion \
-            --target-tags=bastion \
             --project="${PROJECT_ID}"
     fi
 
@@ -247,6 +246,9 @@ provision_networking() {
                 --project="${PROJECT_ID}"
         fi
     fi
+    
+    # 7. Ingress Resources (IPs, Backends, Forwarding Rules)
+    apply_ingress
 }
 
 ensure_backends() {
@@ -313,7 +315,6 @@ apply_ingress() {
     # --- Step 2: Rule Reconciliation (Forwarding & Firewall) ---
     log "Reconciling Forwarding & Firewall Rules (Based on INGRESS_IPV4_CONFIG)..."
     
-    # Parse Config
     # Parse Config
     IFS=';' read -ra CONFIG_ADDR <<< "$INGRESS_IPV4_CONFIG"
     

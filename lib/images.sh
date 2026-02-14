@@ -75,15 +75,24 @@ resolve_vanilla_image() {
 get_schematic_id() {
     local version="$1"
     local extensions="$2" # comma separated
+    local kernel_args="$3" # comma separated or space separated (we will parse)
     
     # Construct JSON payload for Factory
     local ext_json
     # Split by comma, trim whitespace, and filter empty strings
     ext_json=$(echo "$extensions" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | sort')
+
+    # Parse Kernel Args to JSON array
+    local kargs_json="[]"
+    if [ -n "$kernel_args" ]; then
+        # Handle space separation. Convert to array.
+        # Use scan to extract non-separator tokens (space delimiter only)
+        kargs_json=$(echo "$kernel_args" | jq -R '[scan("[^ ]+")]')
+    fi
     
     local payload
-    payload=$(jq -n --arg ver "$version" --argjson ext "$ext_json" \
-        '{customization: {systemExtensions: {officialExtensions: $ext}}}')
+    payload=$(jq -n --arg ver "$version" --argjson ext "$ext_json" --argjson kargs "$kargs_json" \
+        '{customization: {systemExtensions: {officialExtensions: $ext}, extraKernelArgs: $kargs}}')
 
     local body_file
     body_file=$(mktemp)
@@ -152,6 +161,7 @@ ensure_single_image() {
     local role="$1"       # "cp" or "worker"
     local version="$2"
     local extensions="$3"
+    local kernel_args="$4"
     
     if [[ "$role" != "cp" && "$role" != "worker" ]]; then
         error "Invalid role: '$role'. Must be 'cp' or 'worker'."
@@ -163,7 +173,7 @@ ensure_single_image() {
     
     # Calculate Suffix (Vanilla vs Extended)
     local suffix
-    if [ -z "$extensions" ]; then
+    if [ -z "$extensions" ] && [ -z "$kernel_args" ]; then
         suffix="gcp-${ARCH}"
     else
         # Deterministic hashing: Sort extensions to avoid 'a,b' vs 'b,a' diffs
@@ -171,8 +181,11 @@ ensure_single_image() {
         local normalized_ext
         normalized_ext=$(echo "${extensions}" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort | tr '\n' ',' | sed 's/,$//')
         
+        local normalized_kargs
+        normalized_kargs=$(echo "${kernel_args}" | tr ' ' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort | tr '\n' ',' | sed 's/,$//')
+
         local ext_hash
-        ext_hash=$(echo "${normalized_ext}" | md5sum | cut -c1-8)
+        ext_hash=$(echo "${normalized_ext}|${normalized_kargs}" | md5sum | cut -c1-8)
         suffix="${role}-${ext_hash}-${ARCH}"
     fi
     
@@ -183,10 +196,10 @@ ensure_single_image() {
     local installer_image=""
     local download_url=""
     
-    if [ -n "$extensions" ]; then
-        log "[${role^^}] Resolving Factory Schematic for Extensions: ${extensions}"
+    if [ -n "$extensions" ] || [ -n "$kernel_args" ]; then
+        log "[${role^^}] Resolving Factory Schematic for Extensions='${extensions}' Args='${kernel_args}'"
         local schematic_id
-        schematic_id=$(get_schematic_id "$version" "$extensions")
+        schematic_id=$(get_schematic_id "$version" "$extensions" "$kernel_args")
         
         if [ -z "$schematic_id" ]; then
              error "Failed to resolve schematic for ${role}."
@@ -206,8 +219,8 @@ ensure_single_image() {
         if [ -z "$download_url" ]; then
              warn "GitHub release artifact not found for ${version}. Trying Factory for Vanilla image..."
              local schematic_id
-             # Pass empty string for extensions to get defaults
-             if schematic_id=$(get_schematic_id "$version" ""); then
+             # Pass empty strings for extensions/args to get defaults
+             if schematic_id=$(get_schematic_id "$version" "" ""); then
                  if ! download_url=$(get_factory_url "${schematic_id}" "${version}"); then
                      error "Factory fallback failed."
                      return 1
@@ -292,9 +305,27 @@ ensure_role_images() {
         run_safe gsutil mb -p "${PROJECT_ID}" -c standard -l "${REGION}" -b on --pap enforced "gs://${BUCKET_NAME}"
     fi
 
-    # Control Plane
-    ensure_single_image "cp" "${CP_TALOS_VERSION}" "${CP_EXTENSIONS}" || return 1
+    # 1. Control Plane Image (Standard)
+    ensure_single_image "cp" "${CP_TALOS_VERSION}" "${CP_EXTENSIONS}" "${CP_KERNEL_ARGS}" || return 1
     
-    # Workers
-    ensure_single_image "worker" "${WORKER_TALOS_VERSION}" "${WORKER_EXTENSIONS}" || return 1
+    # 2. Worker Images (Per Pool)
+    # Iterate over all defined pools to ensure their specific images exist.
+    if [ -n "${NODE_POOLS:-}" ]; then
+        for pool in "${NODE_POOLS[@]}"; do
+            local safe_pool="${pool//-/_}"
+            local pool_ext_var="POOL_${safe_pool^^}_EXTENSIONS"
+            local pool_kargs_var="POOL_${safe_pool^^}_KERNEL_ARGS"
+            
+            # Resolve Pool Specifics -> Generic Pool Defaults -> Global Defaults
+            # Note: POOL_EXTENSIONS defaults to WORKER_EXTENSIONS in config.sh, so we just check POOL_EXTENSIONS fallback
+            local extensions="${!pool_ext_var:-$POOL_EXTENSIONS}"
+            local kernel_args="${!pool_kargs_var:-$POOL_KERNEL_ARGS}"
+            
+            log "Ensuring image for pool '${pool}' (Ext: ${extensions}, KArgs: ${kernel_args})..."
+            ensure_single_image "worker" "${WORKER_TALOS_VERSION}" "${extensions}" "${kernel_args}" || return 1
+        done
+    else
+        # Fallback for legacy single-worker setup
+        ensure_single_image "worker" "${WORKER_TALOS_VERSION}" "${WORKER_EXTENSIONS}" "${WORKER_KERNEL_ARGS}" || return 1
+    fi
 }
