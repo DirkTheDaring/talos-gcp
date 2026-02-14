@@ -1,13 +1,13 @@
 #!/bin/bash
 
 
-phase2_infra_cp() {
-    phase2_networking
-    phase2_controlplane
+provision_controlplane_infra() {
+    provision_networking
+    provision_controlplane_nodes
 }
 
-phase2_controlplane() {
-    log "Phase 2c: Control Plane..."
+provision_controlplane_nodes() {
+    log "Phase 3: Control Plane Nodes..."
 
     # 1. Instance Group (Control Plane)
     if ! gcloud compute instance-groups unmanaged describe "${IG_CP_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
@@ -231,7 +231,7 @@ def patch_file(filename, is_controlplane):
             nic1['dhcp'] = True
             nic1['mtu'] = 1460
             # Crucial: Prevent default gateway on storage network to force Primary IP selection
-            nic1['ignoreDefaultRoute'] = True
+            # nic1['ignoreDefaultRoute'] = True (Removed: Causes boot loop on Talos v1.12.3)
 
 
 
@@ -300,8 +300,8 @@ PYEOF
     fi
 }
 
-phase3_run() {
-    log "Phase 3: Waiting for Nodes to be RUNNING (max 10m)..."
+wait_for_controlplane() {
+    log "Phase 5: Waiting for Nodes to be RUNNING (max 10m)..."
     local MAX_RETRIES=60
     local COUNT=0
     

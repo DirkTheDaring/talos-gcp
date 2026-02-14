@@ -1,7 +1,7 @@
 #!/bin/bash
 
-phase2_bastion() {
-    log "Phase 2b: Bastion..."
+provision_bastion() {
+    log "Phase 4: Bastion Provisioning..."
     if ! gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" &> /dev/null; then
         log "Creating Bastion..."
         cat <<EOF > "${OUTPUT_DIR}/bastion_startup.sh"
@@ -61,6 +61,9 @@ if [ -n "\$BASH_VERSION" ]; then
     fi
     if command -v talosctl >/dev/null 2>&1; then
         source <(talosctl completion bash)
+    fi
+    if command -v cilium >/dev/null 2>&1; then
+        source <(cilium completion bash)
     fi
 fi
 BZ
@@ -189,8 +192,8 @@ EOF
     fi
 }
 
-phase4_bastion() {
-    log "Phase 4: Setting up Bastion..."
+configure_bastion() {
+    log "Phase 6: Configuring Bastion..."
     
     # Retrieve Control Plane IP for config (Needed for talosctl config node)
     local CP_ILB_IP

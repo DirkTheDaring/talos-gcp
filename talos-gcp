@@ -3,7 +3,7 @@
 # Talos GCP Deployment Script
 # Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
 
-#set -x
+set -x
 
 set -euo pipefail
 
@@ -93,6 +93,10 @@ source "${SCRIPT_DIR}/lib/cni.sh"
 
 # New Libraries
 source "${SCRIPT_DIR}/lib/images.sh"
+source "${SCRIPT_DIR}/lib/connect.sh"
+source "${SCRIPT_DIR}/lib/info.sh"
+source "${SCRIPT_DIR}/lib/addons.sh"
+source "${SCRIPT_DIR}/lib/verify.sh"
 source "${SCRIPT_DIR}/lib/bootstrap.sh"
 source "${SCRIPT_DIR}/lib/lifecycle.sh"
 source "${SCRIPT_DIR}/lib/ops.sh"
@@ -260,6 +264,11 @@ case "$COMMAND" in
         set_names
         check_dependencies
         verify_connectivity
+        ;;
+    verify-ccm)
+        set_names
+        check_dependencies
+        verify_ccm
         ;;
     update-labels)
         set_names

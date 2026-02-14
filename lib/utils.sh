@@ -50,12 +50,13 @@ run_safe() {
 check_dependencies() {
     log "Checking dependencies..."
     # strict dependencies (System Tools Only)
-    for cmd in gcloud gsutil curl envsubst python3 jq; do
+    for cmd in gcloud gsutil curl envsubst python3 jq kubectl; do
         if ! command -v "$cmd" &> /dev/null; then
              error "System dependency '$cmd' is required but not installed."
              exit 1
         fi
     done
+    export KUBECTL="kubectl"
 
     # Check for PyYAML
     if ! python3 -c "import yaml" &> /dev/null; then

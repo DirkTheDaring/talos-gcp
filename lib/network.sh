@@ -36,8 +36,8 @@ check_overlap('STORAGE_CIDR', storage, 'SERVICE_CIDR', '${SERVICE_CIDR}')
     fi
 }
 
-phase2_networking() {
-    log "Phase 2a: Network Infrastructure..."
+provision_networking() {
+    log "Phase 2: Network Infrastructure..."
     
     validate_cidrs
 
@@ -281,8 +281,8 @@ apply_ingress() {
     log "Applying Ingress Configuration..."
     ensure_backends
     
-    # --- PHASE 1: IP Provisioning ---
-    log "Phase 1: Reconciling Static IPs (Count: ${INGRESS_IP_COUNT})..."
+    # --- Step 1: IP Provisioning ---
+    log "Reconciling Static IPs (Count: ${INGRESS_IP_COUNT})..."
     
     # 1. Create/Verify IPs up to Count
     for (( i=0; i<INGRESS_IP_COUNT; i++ )); do
@@ -310,8 +310,8 @@ apply_ingress() {
         prune_start=$((prune_start+1))
     done
 
-    # --- PHASE 2: Rule Reconciliation (Forwarding & Firewall) ---
-    log "Phase 2: Reconciling Forwarding & Firewall Rules (Based on INGRESS_IPV4_CONFIG)..."
+    # --- Step 2: Rule Reconciliation (Forwarding & Firewall) ---
+    log "Reconciling Forwarding & Firewall Rules (Based on INGRESS_IPV4_CONFIG)..."
     
     # Parse Config
     # Parse Config
@@ -459,7 +459,7 @@ apply_ingress() {
          fi
     done
     
-    # --- PHASE 3: Prune Orphaned Rules (Indices >= Count) ---
+    # --- Step 3: Prune Orphaned Rules (Indices >= Count) ---
     local prune_start=$INGRESS_IP_COUNT
     while true; do
         local rule_name_tcp="${CLUSTER_NAME}-ingress-v4-rule-${prune_start}-tcp"

@@ -6,17 +6,20 @@ apply() {
     set_names
     check_dependencies || return 1
     
-    log "Applying configuration changes..."
+    log "Updating Cluster Configuration..."
     log "Target Worker Count: ${WORKER_COUNT}"
+    
+    # Ensure Output Directory exists (Critical for generated files)
+    mkdir -p "${OUTPUT_DIR}"
     
     # Ensure Images exist (create if missing, skip if present)
     ensure_role_images || return 1
     
     # Reconcile Networking (Firewall Rules, etc.) - Allows Day 2 updates
-    phase2_networking || return 1
+    provision_networking || return 1
     
     # Reconcile Workers (Create missing, Prune extra)
-    phase2_workers || return 1
+    provision_workers || return 1
     
     # Update Schedule (Work Hours)
     update_schedule
@@ -85,7 +88,7 @@ start_nodes() {
     fi
 }
 
-phase1_resources() {
+provision_resources() {
     log "Phase 1: Resource Gathering..."
     check_apis
     check_quotas
@@ -120,15 +123,36 @@ phase1_resources() {
 deploy_all() {
     set_names
     check_dependencies || return 1
-    phase1_resources || return 1
-    phase2_infra_cp || return 1 # Networking, CP
-    phase2_bastion || return 1  # Create Bastion
-    phase3_run || return 1      # Wait for CP
-    phase4_bastion || return 1  # Wait for Bastion
-    phase5_register || return 1 # Bootstrap, CNI, CCM, CSI
     
-    # Create Workers AFTER CNI is ready (Critical for Cilium)
-    phase2_workers || return 1
+    # 1. Resources & Checks
+    provision_resources || return 1
+    
+    # 2. Infrastructure (Networking & Control Plane)
+    provision_controlplane_infra || return 1 
+    
+    # 3. Bastion Creation
+    provision_bastion || return 1
+    
+    # 4. Wait for Control Plane to be RUNNING
+    wait_for_controlplane || return 1
+    
+    # 5. Configure Bastion (and push initial configs)
+    configure_bastion || return 1
+    
+    # 6. Bootstrap & Kubeconfig
+    bootstrap_etcd || return 1
+    
+    # 7. K8s Networking (VIP Alias & CNI)
+    provision_k8s_networking || return 1
+    
+    # 8. K8s Addons (CCM & CSI)
+    provision_k8s_addons || return 1
+    
+    # 9. Workers (Created only AFTER CNI is ready)
+    provision_workers || return 1
+    
+    # 10. Finalize Bastion (Sync /etc/skel)
+    finalize_bastion_config || return 1
     
     # Update Schedule (Work Hours)
     update_schedule

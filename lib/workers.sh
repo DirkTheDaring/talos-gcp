@@ -1,7 +1,7 @@
 #!/bin/bash
 
-phase2_workers() {
-    log "Phase 2d: Workers & Ingress..."
+provision_workers() {
+    log "Phase 10: Workers & Ingress..."
     # Rely on global variables from set_names
    
     

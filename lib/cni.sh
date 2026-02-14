@@ -8,8 +8,10 @@ deploy_cilium() {
     log "Ensuring Helm is installed on Bastion..."
     
     # Check if Cilium is already running to avoid redundant reinstall (unless forced)
+    # We use 'timeout 10s' because if the API server (VIP) is down, this check might hang.
+    # If it fails/times out, we assume it's NOT installed and proceed to install (which has the Direct IP fix).
     if [ "$FORCE_UPDATE" != "true" ]; then
-        if gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get ds cilium -n kube-system" &> /dev/null; then
+        if timeout 10s gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get ds cilium -n kube-system" &> /dev/null; then
              log "Cilium is already installed (DaemonSet found). Skipping installation."
              log "Use './talos-gcp update-cilium' to force an upgrade."
              return
@@ -43,12 +45,31 @@ deploy_cilium() {
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "helm repo add cilium https://helm.cilium.io/ && helm repo update"
     
     # 2. Generate Values
-    local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
+    # CRITICAL: We MUST use the Internal Load Balancer IP for k8sServiceHost
+    # This ensures Cilium on worker nodes can reach the API server even if
+    # they are on different subnets or the CP nodes cycle.
+    local CP_ILB_IP=""
+    
+    # Retry loop for ILB IP (it might be provisioning)
+    for i in {1..12}; do
+         CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+         if [ -n "$CP_ILB_IP" ]; then
+             break
+         fi
+         log "Waiting for Internal Load Balancer IP... (Attempt $i/12)"
+         sleep 5
+    done
+
     if [ -z "$CP_ILB_IP" ]; then
         error "Could not determine Control Plane Internal IP for Cilium configuration."
         exit 1
     fi
     log "Using Control Plane Internal IP: ${CP_ILB_IP}"
+
+    # Get CP-0 Direct IP for Bootstrap Access (Bypass VIP)
+    local cp_0_name="${CLUSTER_NAME}-cp-0"
+    local CP_0_IP=$(gcloud compute instances describe "${cp_0_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].networkIP)" --project="${PROJECT_ID}")
+    log "Using CP-0 Direct IP for Bootstrap: ${CP_0_IP}"
 
     # Note: We use specific GCP/Talos settings (IPAM kubernetes, VXLAN, KubeProxyReplacement, etc.)
     # We must substitute variables.
@@ -84,8 +105,8 @@ deploy_cilium() {
     cat <<EOF > "${OUTPUT_DIR}/cilium-values.yaml"
 ipam:
   mode: kubernetes
-k8sServiceHost: "localhost"
-k8sServicePort: 7445
+k8sServiceHost: "${CP_ILB_IP}"
+k8sServicePort: 6443
 kubeProxyReplacement: true
 securityContext:
   capabilities:
@@ -182,23 +203,57 @@ set -e
 set -o pipefail
 export KUBECONFIG=~/.kube/config
 
+# Direct Access Configuration
+if [ -n "${CP_0_IP}" ] && [ -n "${CP_ILB_IP}" ]; then
+    echo "Configuring direct access to API Server (${CP_0_IP}) to bypass VIP..."
+    cp ~/.kube/config ~/.kube/config.direct
+    sed -i "s/${CP_ILB_IP}/${CP_0_IP}/g" ~/.kube/config.direct
+    export KUBECONFIG=~/.kube/config.direct
+fi
+
+# Wait for API Server to be reachable
+echo "Waiting for API Server to be reachable..."
+for i in {1..20}; do
+    if kubectl version &>/dev/null; then
+        echo "API Server reachable."
+        break
+    fi
+    echo "API Server not yet reachable. Retrying in 5s... (Attempt \$i/20)"
+    sleep 5
+done
+
 # Install/Upgrade Cilium
 helm upgrade --install cilium cilium/cilium --version ${CILIUM_VERSION} \\
    --namespace kube-system \\
    --values cilium-values.yaml
 
-echo "Waiting for Cilium to be ready..."
-# Initial wait for pods to be created
-sleep 10
-kubectl rollout status ds/cilium -n kube-system --timeout=300s
+echo "Cilium installed. Proceeding to CCM deployment to finalize network configuration..."
+# Note: We do NOT wait for rollout status here because Cilium needs CCM (next step) to assign PodCIDRs.
 EOF
     chmod +x "${OUTPUT_DIR}/install_cilium.sh"
 
     log "Pushing Cilium artifacts to Bastion..."
-    run_safe gcloud compute scp "${OUTPUT_DIR}/cilium-values.yaml" "${OUTPUT_DIR}/install_cilium.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+    # Copy individually to avoid ambiguity
+    run_safe gcloud compute scp "${OUTPUT_DIR}/cilium-values.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+    run_safe gcloud compute scp "${OUTPUT_DIR}/install_cilium.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
     
     log "Executing Helm Install on Bastion..."
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./install_cilium.sh && rm install_cilium.sh"
+    if ! run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "chmod +x install_cilium.sh && ./install_cilium.sh"; then
+        error "Cilium Installation Failed!"
+        exit 1
+    fi
+    
+    # Verify Installation
+    # We use 'timeout 10s' because if the API server (VIP) is down, this check might hang.
+    if ! timeout 10s gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ~/.kube/config get ds cilium -n kube-system" &>/dev/null; then
+         warn "Cilium DaemonSet verification timed out or failed (VIP might be down)."
+         warn "Assuming success based on Helm exit code. CCM deployment will proceed."
+    else
+         log "Cilium DaemonSet verified."
+    fi
+
+    # Cleanup (only if successful)
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "rm install_cilium.sh"
     # rm -f "${OUTPUT_DIR}/cilium-values.yaml" "${OUTPUT_DIR}/install_cilium.sh"
     log "Cilium values file preserved at: ${OUTPUT_DIR}/cilium-values.yaml"
 }
@@ -214,6 +269,6 @@ deploy_cni() {
     else
         log "Deploying CNI (Flannel)..."
         # Starting with Talos v1.12+, external cloud providers might need explicit CNI
-        run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml"
+        run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ~/.kube/config apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml"
     fi
 }

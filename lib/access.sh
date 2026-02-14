@@ -223,6 +223,14 @@ cmd_grant_admin() {
     fi
     local EMAIL="$1"
     log "Granting Admin Access to '${EMAIL}'..."
+
+    # Check if SA exists
+    if ! gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}" &>/dev/null; then
+        error "Service Account '${SA_EMAIL}' not found."
+        error "This usually means the CLUSTER_NAME or REGION is incorrect."
+        error "Action: Provide the correct config file with -c clusters/YOUR_CLUSTER.env"
+        return 1
+    fi
     
     # 1a. OS Admin Login (Root SSH)
     log "  -> Adding 'roles/compute.osAdminLogin' (Root Access)..."
@@ -278,6 +286,14 @@ cmd_grant_access() {
     fi
     local EMAIL="$1"
     log "Granting Developer Access to '${EMAIL}'..."
+
+    # Check if SA exists
+    if ! gcloud iam service-accounts describe "${SA_EMAIL}" --project="${PROJECT_ID}" &>/dev/null; then
+        error "Service Account '${SA_EMAIL}' not found."
+        error "This usually means the CLUSTER_NAME or REGION is incorrect."
+        error "Action: Provide the correct config file with -c clusters/YOUR_CLUSTER.env"
+        return 1
+    fi
     
     # 1. OS Login (Non-Admin) - Allows SSH Key management & Instance Get
     log "  -> Adding 'roles/compute.osLogin' (Instance Access)..."
