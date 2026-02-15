@@ -11,7 +11,7 @@ deploy_cilium() {
     # We use 'timeout 10s' because if the API server (VIP) is down, this check might hang.
     # If it fails/times out, we assume it's NOT installed and proceed to install (which has the Direct IP fix).
     if [ "$FORCE_UPDATE" != "true" ]; then
-        if timeout 10s gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ./kubeconfig get ds cilium -n kube-system" &> /dev/null; then
+        if timeout 30s gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ~/.kube/config get ds cilium -n kube-system" &> /dev/null; then
              log "Cilium is already installed (DaemonSet found). Skipping installation."
              log "Use './talos-gcp update-cilium' to force an upgrade."
              return
@@ -81,22 +81,30 @@ deploy_cilium() {
     local native_cidr_line=""
     local endpoint_routes=""
     local mtu_line=""
+    local auto_direct_node_routes_line=""
 
     if [ "$routing_mode" == "native" ]; then
-        log "Configuring Cilium for NATIVE Routing (GCP Alias IPs)..."
-        tunnel_protocol=""  # Disable tunneling
-        masquerade="false"  # Pods are natively routable
+        log "Configuring Cilium for NATIVE Routing (GCP Alias IPs) with forced CIDR and MTU..."
+        # Reverting to default (empty) as "disabled" caused crash. 
+        # We rely on routingMode: native to disable encapsulation implicitly.
+        tunnel_protocol_line=""
+        masquerade="true"  # Enable BPF masquerade for better BPF datapath integration
         # Correctly format endpointRoutes variable with a newline
         endpoint_routes="endpointRoutes:
   enabled: true"
         mtu_line="mtu: 1460" # Native GCP MTU
+        # autoDirectNodeRoutes causes issues on GCP (gateway invalid). VPC handles routing.
+        auto_direct_node_routes_line="autoDirectNodeRoutes: false"
         
-        # Explicit CIDR for native routing
-        if [ -n "${CILIUM_NATIVE_CIDR}" ]; then
-            native_cidr_line="ipv4NativeRoutingCIDR: \"${CILIUM_NATIVE_CIDR}\""
+        # Use Standard GCP Native Routing Configuration
+        # gke.enabled: true handles defaults. We just supply the correct Native CIDR.
+        local native_cidr="${CILIUM_NATIVE_CIDR:-$POD_CIDR}"
+        if [ -n "${native_cidr}" ]; then
+            native_cidr_line="ipv4NativeRoutingCIDR: \"${native_cidr}\""
         fi
     else
         log "Configuring Cilium for TUNNEL Routing (VXLAN)..."
+        tunnel_protocol_line="tunnelProtocol: vxlan"
         # Tunnel Mode: Leave MTU empty to allow Cilium to auto-detect (usually 1460-50 = 1410)
         # Setting "mtu: 1460" explicitly with VXLAN causes packet drops on GCP.
         mtu_line="" 
@@ -105,6 +113,13 @@ deploy_cilium() {
     cat <<EOF > "${OUTPUT_DIR}/cilium-values.yaml"
 ipam:
   mode: kubernetes
+# gke.enabled: true removed to avoid overriding k8sServiceCIDR
+# gke:
+#   enabled: true
+# Critical: Match Talos Service CIDR so BPF intercepts traffic
+# We use extraConfig to force it into the ConfigMap as standard value key seemingly failed
+extraConfig:
+  k8s-service-cidr: "172.30.0.0/20"
 k8sServiceHost: "${CP_ILB_IP}"
 k8sServicePort: 6443
 kubeProxyReplacement: true
@@ -131,10 +146,11 @@ cgroup:
     enabled: false
   hostRoot: /sys/fs/cgroup
 routingMode: ${routing_mode}
-tunnelProtocol: ${tunnel_protocol}
+${tunnel_protocol_line}
 ${endpoint_routes}
 ${native_cidr_line}
 ${mtu_line}
+${auto_direct_node_routes_line}
 debug:
   enabled: true
 bpf:

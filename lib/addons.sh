@@ -111,6 +111,9 @@ spec:
       - key: node.cilium.io/agent-not-ready
         operator: Exists
         effect: NoSchedule
+      - key: node.kubernetes.io/not-ready
+        operator: Exists
+        effect: NoSchedule
       # CRITICAL: Toleration for network-unavailable is required for CCM to run and assign PodCIDRs
       # matching the taint that Cilium (waiting for PodCIDR) cannot yet remove.
       - key: node.kubernetes.io/network-unavailable

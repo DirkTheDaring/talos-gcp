@@ -3,7 +3,7 @@
 # Talos GCP Deployment Script
 # Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
 
-#set -x
+set -x
 
 set -euo pipefail
 
@@ -48,6 +48,8 @@ done
 set -- "${ARGS[@]}"
 
 # Load Config if specified
+source "${SCRIPT_DIR}/lib/config.sh" # Load defaults first
+
 if [ -n "$CONFIG_FILE" ]; then
     if [ -f "$CONFIG_FILE" ]; then
         echo "Loading config from $CONFIG_FILE..."
@@ -84,7 +86,6 @@ REGION=${REGION:-"us-central1"}
 ZONE=${ZONE:-"${REGION}-b"}
 
 # Import Libraries (Order matters for overrides/defaults)
-source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/network.sh"
 source "${SCRIPT_DIR}/lib/bastion.sh"
 source "${SCRIPT_DIR}/lib/controlplane.sh"
@@ -96,6 +97,7 @@ source "${SCRIPT_DIR}/lib/images.sh"
 source "${SCRIPT_DIR}/lib/connect.sh"
 source "${SCRIPT_DIR}/lib/info.sh"
 source "${SCRIPT_DIR}/lib/addons.sh"
+source "${SCRIPT_DIR}/lib/peering.sh"
 source "${SCRIPT_DIR}/lib/verify.sh"
 source "${SCRIPT_DIR}/lib/bootstrap.sh"
 source "${SCRIPT_DIR}/lib/lifecycle.sh"
@@ -105,6 +107,8 @@ source "${SCRIPT_DIR}/lib/traefik.sh"
 source "${SCRIPT_DIR}/lib/orphans.sh"
 source "${SCRIPT_DIR}/lib/access.sh"
 source "${SCRIPT_DIR}/lib/binaries.sh"
+source "${SCRIPT_DIR}/lib/gen.sh"
+source "${SCRIPT_DIR}/lib/diagnose.sh"
 
 source "${SCRIPT_DIR}/lib/help.sh"
 
@@ -119,8 +123,13 @@ if [ $# -lt 1 ]; then
 fi
 
 COMMAND="$1"
-
+echo "DEBUG: Parsed command: $COMMAND" >&2
 case "$COMMAND" in
+    gen-config)
+        # Standalone config generation (Mocked)
+        set_names
+        cmd_gen_config
+        ;;
     create)
         check_dependencies
         # Ensure tools
@@ -147,6 +156,11 @@ case "$COMMAND" in
         set_names
         # check_dependencies - Not needed
         diagnose
+        ;;
+    diagnose-network)
+        set_names
+        check_dependencies
+        diagnose_network
         ;;
     list-clusters|list)
         set_names

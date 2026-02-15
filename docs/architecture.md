@@ -57,3 +57,21 @@ Talos Linux is immutable and has a read-only file system. Standard CSI installat
     *   **Talos Constraint**: Talos Linux is an immutable operating system. Directories like `/etc` and `/lib` are read-only (SquashFS). Additionally, Talos manages device nodes differently and does not expose a standard `udev` socket in `/run/udev`.
     *   **The Fix**: A custom Python patch script runs during deployment to **remove these specific volumes and volumeMounts** from the CSI driver manifest.
     *   **Why it works**: Talos's kernel and udev implementation automatically handle the attachment and recognition of GCP Persistent Disks. The CSI driver functions correctly without these mounts in the Talos environment, whereas leaving them in causes Pod failures due to "Read-only file system" errors.
+
+## IP Address Management (IPAM) policy
+
+### Single Source of Truth: Google Cloud
+To ensure native routing works reliably, we enforce a strict **Single Source of Truth** policy for IP Address Management.
+
+**The Decision:**
+- **Authority:** Google Cloud Platform (GCP) is the sole authority for PodCIDR allocation.
+- **Mechanism:** The GCP Cloud Controller Manager (CCM) allocates PodCIDRs to nodes and updates the Node resource.
+- **Restriction:** The Kubernetes Controller Manager (KCM) is strictly **forbidden** from allocating PodCIDRs (`--allocate-node-cidrs=false`).
+
+**Why? (Split-Brain Routing Prevention)**
+If both KCM and CCM attempt to allocate PodCIDRs, they often disagree. KCM might assign `10.244.0.0/24` while GCP assigns `10.244.1.0/24` via Alias IPs. This creates a "Split-Brain" state where:
+1.  **Kubernetes thinks:** Node A has `10.244.0.0/24`.
+2.  **The Network (GCP VPC) routes:** `10.244.1.0/24` to Node A.
+3.  **Result:** Traffic is blackholed.
+
+By disabling KCM allocation, we force Kubernetes to accept whatever IP range the Cloud Provider (GCP) has assigned to the VM's network interface as an Alias IP.

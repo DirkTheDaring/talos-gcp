@@ -174,10 +174,20 @@ provision_networking() {
     if [ -n "$open_tcp" ] || [ -n "$open_udp" ]; then
         log "Configuring Custom Worker Firewall Rule (${FW_WORKER_CUSTOM})..."
         local allowed=""
-        if [ -n "$open_tcp" ]; then allowed="tcp:${open_tcp}"; fi
+        if [ -n "$open_tcp" ]; then
+            # Split by comma and prepend tcp:
+            IFS=',' read -ra TCP_PORTS <<< "$open_tcp"
+            for port in "${TCP_PORTS[@]}"; do
+                if [ -n "$allowed" ]; then allowed="${allowed},"; fi
+                allowed="${allowed}tcp:${port}"
+            done
+        fi
         if [ -n "$open_udp" ]; then
-            if [ -n "$allowed" ]; then allowed="${allowed},"; fi
-            allowed="${allowed}udp:${open_udp}"
+             IFS=',' read -ra UDP_PORTS <<< "$open_udp"
+             for port in "${UDP_PORTS[@]}"; do
+                if [ -n "$allowed" ]; then allowed="${allowed},"; fi
+                allowed="${allowed}udp:${port}"
+            done
         fi
         
         if gcloud compute firewall-rules describe "${FW_WORKER_CUSTOM}" --project="${PROJECT_ID}" &>/dev/null; then
@@ -247,7 +257,12 @@ provision_networking() {
         fi
     fi
     
-    # 7. Ingress Resources (IPs, Backends, Forwarding Rules)
+    # 7. Peering
+    if type reconcile_peering &>/dev/null; then
+        reconcile_peering
+    fi
+
+    # 8. Ingress Resources (IPs, Backends, Forwarding Rules)
     apply_ingress
 }
 
@@ -259,9 +274,7 @@ ensure_backends() {
      if ! gcloud compute backend-services describe "${BE_WORKER_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
         run_safe gcloud compute backend-services create "${BE_WORKER_NAME}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --protocol=TCP --health-checks-region="${REGION}" --health-checks="${HC_WORKER_NAME}" --project="${PROJECT_ID}"
     fi
-    if ! gcloud compute backend-services describe "${BE_WORKER_NAME}" --region "${REGION}" --project="${PROJECT_ID}" | grep -q "group: .*${IG_WORKER_NAME}"; then
-         run_safe gcloud compute backend-services add-backend "${BE_WORKER_NAME}" --region "${REGION}" --instance-group "${IG_WORKER_NAME}" --instance-group-zone "${ZONE}" --project="${PROJECT_ID}" || true
-    fi
+    # NOTE: Attachment is handled in provision_workers() to support dynamic pools
 
     # 2. UDP Backend Service
     if ! gcloud compute health-checks describe "${HC_WORKER_UDP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
@@ -272,9 +285,6 @@ ensure_backends() {
     fi
      if ! gcloud compute backend-services describe "${BE_WORKER_UDP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" &> /dev/null; then
         run_safe gcloud compute backend-services create "${BE_WORKER_UDP_NAME}" --region "${REGION}" --load-balancing-scheme=EXTERNAL --protocol=UDP --health-checks-region="${REGION}" --health-checks="${HC_WORKER_UDP_NAME}" --project="${PROJECT_ID}"
-    fi
-    if ! gcloud compute backend-services describe "${BE_WORKER_UDP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" | grep -q "group: .*${IG_WORKER_NAME}"; then
-         run_safe gcloud compute backend-services add-backend "${BE_WORKER_UDP_NAME}" --region "${REGION}" --instance-group "${IG_WORKER_NAME}" --instance-group-zone "${ZONE}" --project="${PROJECT_ID}" || true
     fi
 }
 

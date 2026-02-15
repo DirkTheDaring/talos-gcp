@@ -142,6 +142,16 @@ provision_k8s_addons() {
         run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl wait --for=condition=Ready nodes --all --timeout=300s || echo 'Warning: Nodes not yet ready, proceeding anyway...'"
         deploy_csi
     fi
+
+    # 4. Verify IPAM Alignment (Split-Brain Check)
+    # Ensure source lib/verify.sh is available (it should be via talos-gcp main script, but verify.sh contains the function)
+    if command -v verify_gcp_alignment &>/dev/null; then
+         verify_gcp_alignment || true
+    else
+         # Fallback if verify.sh not sourced in this scope (should act as library)
+         # We expect verify.sh to be sourced by the main script.
+         warn "verify_gcp_alignment function not found. Skipping IPAM check."
+    fi
 }
 
 # 5d. Finalize Bastion Config

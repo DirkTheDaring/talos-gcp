@@ -4,6 +4,20 @@ diagnose() {
     set_names
     # check_dependencies - Not needed
     
+    mkdir -p _out
+    echo "--- pwd ---" > _out/diagnose.txt
+    pwd >> _out/diagnose.txt
+    echo "--- ls -la ---" >> _out/diagnose.txt
+    ls -la >> _out/diagnose.txt
+    echo "--- env ---" >> _out/diagnose.txt
+    env >> _out/diagnose.txt
+    echo "--- whoami ---" >> _out/diagnose.txt
+    whoami >> _out/diagnose.txt
+    echo "--- python3 version ---" >> _out/diagnose.txt
+    python3 --version >> _out/diagnose.txt
+    
+    log "Environment diagnostics written to _out/diagnose.txt"
+    
     echo "========================================="
     echo " Talos GCP Diagnostics"
     echo " Cluster: ${CLUSTER_NAME}"
@@ -338,5 +352,57 @@ verify_ccm() {
     else
         error "CCM Verification Failed with $fail errors."
         return 1
+    fi
+}
+
+
+verify_gcp_alignment() {
+    log "Verifying GCP Alias IP <-> K8s PodCIDR Alignment..."
+    
+    # 1. Get K8s Nodes and CIDRs
+    log "Fetching Kubernetes Node CIDRs..."
+    # Format: node-name cidr
+    # We use explicit gcloud ssh to be robust
+    local K8S_CIDRS=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.spec.podCIDR}{\"\n\"}{end}'" 2>/dev/null)
+    
+    if [ -z "$K8S_CIDRS" ]; then
+        warn "Could not fetch Kubernetes Nodes. Skipping alignment check."
+        return 0
+    fi
+    
+    # 2. Get GCP Alias IPs
+    log "Fetching GCP Alias IPs..."
+    # Format: node-name alias-ip-range
+    local GCP_ALIASES=$(gcloud compute instances list --filter="name~'${CLUSTER_NAME}-.*'" --project="${PROJECT_ID}" --format="table(name,networkInterfaces[0].aliasIpRanges.ipCidrRange.list())" | tail -n +2)
+    
+    local MISMATCH_FOUND=false
+    
+    # 3. Compare
+    echo "$K8S_CIDRS" | while read -r node cidr; do
+        # Find corresponding GCP Alias
+        local gcp_alias=$(echo "$GCP_ALIASES" | grep "^${node}\s" | awk '{print $2}')
+        
+        if [ -z "$cidr" ] || [ "$cidr" == "<none>" ]; then
+            warn "Node $node has no PodCIDR assigned in Kubernetes."
+            continue
+        fi
+        
+        if [ -z "$gcp_alias" ]; then
+            error "Node $node has PodCIDR $cidr but NO Alias IP in GCP!"
+            MISMATCH_FOUND=true
+        elif [ "$gcp_alias" != "$cidr" ]; then
+            error "Node $node Split-Brain Detected! K8s: $cidr != GCP: $gcp_alias"
+            MISMATCH_FOUND=true
+        else
+            log "OK: Node $node ($cidr) matches GCP Alias."
+        fi
+    done
+    
+    if [ "$MISMATCH_FOUND" == "true" ]; then
+        error "IPAM Misalignment Detected! See logs above."
+        return 1
+    else
+        log "GCP IPAM Alignment Verified."
+        return 0
     fi
 }

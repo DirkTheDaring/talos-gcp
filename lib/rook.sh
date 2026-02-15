@@ -2,16 +2,70 @@
 
 # Rook Ceph Deployment via Helm
 
-deploy_rook() {
-    local FORCE_UPDATE="${1:-false}"
-    log "Deploying Rook Ceph (Version: ${ROOK_CHART_VERSION})..."
-
-    install_rook_operator
-    deploy_rook_cluster
+verify_rook_nodes() {
+    log "Verifying Rook Ceph Node Infrastructure..."
+    
+    for pool in "${NODE_POOLS[@]}"; do
+        # Sanitize pool name (e.g. rook-ceph-mon -> rook_ceph_mon)
+        local safe_pool="${pool//-/_}"
+        local count_var="POOL_${safe_pool^^}_COUNT"
+        local expected_count="${!count_var:-0}"
+        local label_var="POOL_${safe_pool^^}_LABELS"
+        local labels="${!label_var:-}"
+        
+        # Extract the role label (e.g. role=ceph-osd) for filtering
+        local role_label=""
+        for l in ${labels//,/ }; do
+            if [[ "$l" == role=* ]]; then
+                role_label="$l"
+                break
+            fi
+        done
+        
+        if [ -z "$role_label" ]; then
+            warn "Pool '$pool' has no 'role=*' label. Skipping verification."
+            continue
+        fi
+        
+        log "  > Checking pool '$pool' (Expected: $expected_count, Label: $role_label)..."
+        
+        # Check active nodes
+        local actual_count=0
+        if [[ "$expected_count" -gt 0 ]]; then
+             # Use kubectl to count nodes with the specific label
+             # We run this exclusively on the bastion to ensure connectivity (Private Clusters)
+             local cmd="kubectl get nodes -l $role_label --no-headers 2>/dev/null | wc -l"
+             
+             local remote_output
+             if ! remote_output=$(run_on_bastion "$cmd"); then
+                 error "Failed to check node count on bastion."
+                 exit 1
+             fi
+             
+             actual_count="$remote_output"
+             # Trim whitespace
+             actual_count="${actual_count//[[:space:]]/}"
+        fi
+        
+        if [[ "$actual_count" -lt "$expected_count" ]]; then
+            error "Node count mismatch for pool '$pool'. Expected: $expected_count, Found: $actual_count"
+            error "Please provision the missing infrastructure before deploying Rook."
+            exit 1
+        else
+            log "    OK: Found $actual_count/$expected_count nodes."
+        fi
+    done
 }
 
-install_rook_operator() {
-    # 0. Ensure Helm is installed on Bastion (Reuse CNI logic or simple check)
+deploy_rook() {
+    local FORCE_UPDATE="${1:-false}"
+    
+    # Pre-flight Verification
+    verify_rook_nodes
+
+    log "Deploying Rook Ceph Operator (Version: ${ROOK_CHART_VERSION}) via Helm..."
+    
+    # 0. Ensure Helm is installed on Bastion
     log "Ensuring Helm is installed on Bastion..."
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
         set -o pipefail
@@ -23,7 +77,7 @@ install_rook_operator() {
         fi
     "
 
-    # 1. Add Helm Repo
+    # 1. Add Rook Helm Repo
     log "Adding Rook Helm Repo..."
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
         helm repo add rook-release https://charts.rook.io/release
@@ -42,14 +96,10 @@ install_rook_operator() {
         helm upgrade --install --namespace rook-ceph rook-ceph rook-release/rook-ceph \\
             --version ${ROOK_CHART_VERSION} \\
             --set env.ROOK_HOSTPATH_REQUIRES_PRIVILEGED=true
-    "
-    
-    log "Waiting for Rook Operator to rollout..."
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl -n rook-ceph rollout status deployment/rook-ceph-operator --timeout=120s"
-
-    # Pre-requisite for Monitoring: ServiceMonitor CRD
-    log "Ensuring Prometheus Operator CRDs exist..."
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
+            
+        kubectl -n rook-ceph rollout status deployment/rook-ceph-operator --timeout=120s
+        
+        # Pre-requisite for Monitoring: ServiceMonitor CRD
         if ! kubectl get crd servicemonitors.monitoring.coreos.com &>/dev/null; then
             echo 'Installing ServiceMonitor CRD...'
             kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.71.2/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
@@ -58,6 +108,7 @@ install_rook_operator() {
         fi
     "
 
+    deploy_rook_cluster
 }
 
 deploy_rook_cluster() {
@@ -110,24 +161,26 @@ def get_disk_path(device_name, disk_config_str):
     Disk Index N: scsi-0:0:(N+2):0
     """
     if not disk_config_str:
-        return f"/dev/disk/by-id/google-{device_name}" # Fallback
-        
-    disks = disk_config_str.strip().split()
-    target_index = -1
-    
-    for idx, disk_def in enumerate(disks):
-        parts = disk_def.split(':')
-        # Format: type:size:name
-        if len(parts) >= 3 and parts[2] == device_name:
-            target_index = idx
-            break
-            
-    if target_index != -1:
-        # Calculate SCSI ID
-        scsi_id = target_index + 2
-        return f"/dev/disk/by-path/pci-0000:00:03.0-scsi-0:0:{scsi_id}:0"
-        
-    return f"/dev/disk/by-id/google-{device_name}" # Fallback if not found
+        return f"/dev/disk/by-id/google-{device_name}" # Default
+
+    # Talos on GCP uses scsi-0Google_PersistentDisk_ prefix
+    return f"/dev/disk/by-id/scsi-0Google_PersistentDisk_{device_name}"
+
+def parse_size_to_bytes(size_str):
+    """Converts a size string (e.g., '2Gi', '512Mi') to bytes."""
+    if not size_str:
+        return 0
+    units = {"Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4}
+    for unit, multiplier in units.items():
+        if size_str.endswith(unit):
+             try:
+                 return int(float(size_str[:-2]) * multiplier)
+             except ValueError:
+                 return 0
+    try:
+        return int(size_str)
+    except ValueError:
+        return 0
 
 def generate_values():
     data_device = os.environ.get('ROOK_DATA_DEVICE_NAME')
@@ -173,8 +226,17 @@ def generate_values():
             
         storage_nodes.append(node_config)
 
+    # Calculate osd_memory_target (approx 80% of container limit or default to 2Gi -> ~1.6Gi target)
+    osd_memory_limit_str = os.environ.get('ROOK_OSD_MEMORY', '2Gi')
+    osd_memory_bytes = parse_size_to_bytes(osd_memory_limit_str)
+    # Set target to 80% of limit to leave room for overhead
+    osd_memory_target = int(osd_memory_bytes * 0.8)
+    
     values = {
         "cephClusterSpec": {
+            "cephVersion": {
+                "image": "quay.io/ceph/ceph:v18.2.4"
+            },
             "mon": {
                 "count": 3,
                 "allowMultiplePerNode": False
@@ -188,19 +250,63 @@ def generate_values():
                 "useAllDevices": False,
                 "nodes": storage_nodes
             },
-            "resources": {
-                "osd": {
-                    "limits": {
-                        "cpu": os.environ.get('ROOK_OSD_CPU', '1'),
-                        "memory": os.environ.get('ROOK_OSD_MEMORY', '2Gi')
-                    },
-                    "requests": {
-                         "cpu": os.environ.get('ROOK_OSD_CPU', '1'),
-                         "memory": os.environ.get('ROOK_OSD_MEMORY', '2Gi')
+            "placement": {
+                "mon": {
+                    "tolerations": [
+                        {
+                            "key": "role",
+                            "operator": "Equal",
+                            "value": "ceph-mon",
+                            "effect": "NoSchedule"
+                        }
+                    ],
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "role",
+                                            "operator": "In",
+                                            "values": ["ceph-mon"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                },
+                "mgr": {
+                    "tolerations": [
+                        {
+                            "key": "role",
+                            "operator": "Equal",
+                            "value": "ceph-mon",
+                            "effect": "NoSchedule"
+                        }
+                    ],
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [
+                                {
+                                    "matchExpressions": [
+                                        {
+                                            "key": "role",
+                                            "operator": "In",
+                                            "values": ["ceph-mon"]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
                     }
                 }
             }
         },
+        "configOverride": f"""[global]
+mon_host = rook-ceph-mon-a.rook-ceph.svc,rook-ceph-mon-b.rook-ceph.svc,rook-ceph-mon-c.rook-ceph.svc
+osd_memory_target = {osd_memory_target}
+""",
         "cephFileSystems": [
             {
                 "name": "ceph-filesystem",

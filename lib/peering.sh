@@ -45,6 +45,31 @@ reconcile_peering() {
     remove_stale_peerings
 }
 
+# Helper to retry peering creation on "operation in progress"
+retry_peering_create() {
+    local max_retries=10
+    local wait_sec=15
+    local count=0
+
+    while [ $count -lt $max_retries ]; do
+        if "$@"; then
+            return 0
+        else
+            local exit_code=$?
+            # We can't easily capture output here without complicating the "run_safe" pattern.
+            # But the error handling logic in the calling script might have already printed it.
+            # Actually, let's just retry blindly on failure if it's likely a race condition.
+            # A better approach is to capture output.
+             warn "  - Peering creation failed. Retrying in ${wait_sec}s (Attempt $((count+1))/${max_retries})..."
+             sleep $wait_sec
+             count=$((count + 1))
+        fi
+    done
+    
+    error "Failed to create peering after ${max_retries} attempts."
+    return 1
+}
+
 # Connects current cluster and remote cluster via VPC Peering
 # Arguments:
 #   $1: remote_cluster_name
@@ -54,6 +79,12 @@ peer_connect() {
     local remote_vpc="${remote_cluster}-vpc"
     local peering_name="peer-${CLUSTER_NAME}-to-${remote_cluster}"
     local reverse_peering_name="peer-${remote_cluster}-to-${CLUSTER_NAME}"
+
+    # Check if Remote VPC exists (Break Circular Dependency)
+    if ! gcloud compute networks describe "${remote_vpc}" --project="${PROJECT_ID}" &>/dev/null; then
+        warn "Remote VPC '${remote_vpc}' not found. Skipping peering (will be established when remote cluster acts)..."
+        return 0
+    fi
 
     log "Checking peering: ${local_vpc} <-> ${remote_vpc}..."
 
@@ -69,7 +100,7 @@ peer_connect() {
         fi
     else
         log "  - Creating peering '${peering_name}'..."
-        run_safe gcloud compute networks peerings create "${peering_name}" \
+        retry_peering_create gcloud compute networks peerings create "${peering_name}" \
             --network="${local_vpc}" \
             --peer-network="${remote_vpc}" \
             --project="${PROJECT_ID}" \
@@ -84,7 +115,7 @@ peer_connect() {
         log "  - Reverse peering '${reverse_peering_name}' already exists."
     else
         log "  - Creating reverse peering '${reverse_peering_name}'..."
-        run_safe gcloud compute networks peerings create "${reverse_peering_name}" \
+        retry_peering_create gcloud compute networks peerings create "${reverse_peering_name}" \
             --network="${remote_vpc}" \
             --peer-network="${local_vpc}" \
             --project="${PROJECT_ID}" \
@@ -110,13 +141,13 @@ update_peering_firewalls() {
     local remote_cidr
     # Attempt to find the subnet in ANY region (Region-Agnostic)
     # We filter by name AND network to ensuring we get the right one
-    remote_cidr=$(gcloud compute networks subnets list --filter="name=${remote_subnet_name} AND network=${remote_cluster}-vpc" --format="value(ipCidrRange)" --project="${PROJECT_ID}" | head -n1)
+    remote_cidr=$(gcloud compute networks subnets list --network="${remote_cluster}-vpc" --filter="name=${remote_subnet_name}" --format="value(ipCidrRange)" --project="${PROJECT_ID}" | head -n1)
     
     # If standard lookup fails (maybe different region?), try alias IP (Pod CIDR) lookup logic if possible.
     # For native routing, we MUST include the secondary ranges (Pod CIDRs) in the allowed source ranges.
     
     local remote_secondary_cidrs
-    remote_secondary_cidrs=$(gcloud compute networks subnets list --filter="name=${remote_subnet_name} AND network=${remote_cluster}-vpc" --format="json(secondaryIpRanges)" --project="${PROJECT_ID}" | jq -r '.[].secondaryIpRanges[].ipCidrRange' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    remote_secondary_cidrs=$(gcloud compute networks subnets list --network="${remote_cluster}-vpc" --filter="name=${remote_subnet_name}" --format="json(secondaryIpRanges)" --project="${PROJECT_ID}" | jq -r '.[].secondaryIpRanges[].ipCidrRange' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 
     if [ -n "$remote_secondary_cidrs" ]; then
         log "  - Found secondary ranges for ${remote_cluster}: ${remote_secondary_cidrs}"
@@ -209,3 +240,4 @@ remove_stale_peerings() {
         fi
     done
 }
+

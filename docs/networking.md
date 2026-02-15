@@ -63,3 +63,37 @@ GCP Internal Load Balancers (ILB) have a limitation where backend instances cann
 
 ### Why `dummy0` instead of `lo`?
 If we attach the VIP to the main Loopback interface (`lo`), the Kubelet or Cloud Controller Manager might incorrectly detect this IP (`10.0.0.2`) as the Node's primary address. This causes GCP validation failures because `10.0.0.2` belongs to a forwarding rule, not an instance. Using `dummy0` keeps the route local but deprioritizes it for node registration.
+
+## 5. Troubleshooting: Split-Brain Routing (Connectivity Failure)
+
+**Symptom:**
+- Pods on one node cannot reach Pods/Services on another node.
+- `kubectl debug` connectivity tests fail with `i/o timeout`.
+- `curl` to `kubernetes.default.svc` fails with timeout.
+
+**Root Cause:**
+This occurs when the Kubernetes Controller Manager (KCM) and the GCP Cloud Controller Manager (CCM) **disagree** on the PodCIDR allocated to a node.
+1.  **GCP (CCM):** Assigns an Alias IP (e.g., `172.20.14.0/24`) to the node's network interface.
+2.  **Kubernetes (KCM):** Assigns a *different* PodCIDR (e.g., `172.20.7.0/24`) to the Node spec because it's configured to allocate CIDRs independently.
+3.  **Conflict:**
+    - The Node thinks it owns `172.20.7.0/24`. CNI (Cilium) configures routes for this range.
+    - The VPC Network thinks the node owns `172.20.14.0/24` and routes traffic for that range to it.
+    - **Result:** Traffic for `172.20.7.x` is dropped by the VPC because it doesn't match the Alias IP. Traffic for `172.20.14.x` arrives but has no local routes on the node.
+
+**The Fix:**
+We utilize the **Single Source of Truth** pattern:
+1.  **Disable KCM Allocation:** We set `--allocate-node-cidrs=false` on the `kube-controller-manager`.
+2.  **Enable CCM Allocation:** The `gcp-cloud-controller-manager` is configured to allocate CIDRs and sync them to the Node spec.
+3.  **Verify:** The startup script now runs `verify_gcp_alignment` to confirm that `kubectl get node <node> -o jsonpath='{.spec.podCIDR}'` matches `gcloud compute instances describe <node> ... aliasIpRanges`.
+
+**Manual Recovery:**
+If this state occurs (e.g., after a misconfiguration), you must manually align the Alias IPs to match Kubernetes:
+```bash
+# 1. Get the PodCIDR K8s thinks the node has
+CIDR=$(kubectl get node <node> -o jsonpath='{.spec.podCIDR}')
+
+# 2. Force GCP to match
+gcloud compute instances network-interfaces update <node> \
+    --zone <zone> \
+    --aliases "pods:${CIDR}"
+```

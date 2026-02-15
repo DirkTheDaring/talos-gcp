@@ -35,9 +35,9 @@ generate_talos_configs() {
     log "Generating Configs (Endpoint: https://${CP_ILB_IP}:6443)..."
     rm -f "${OUTPUT_DIR}/controlplane.yaml" "${OUTPUT_DIR}/worker.yaml" "${OUTPUT_DIR}/talosconfig"
     
-    if command -v podman &> /dev/null; then
+    if [ -z "${TALOSCTL_FORCE_BINARY:-}" ] && command -v podman &> /dev/null; then
         run_safe podman run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
-    elif command -v docker &> /dev/null; then
+    elif [ -z "${TALOSCTL_FORCE_BINARY:-}" ] && command -v docker &> /dev/null; then
         run_safe docker run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
     else
         run_safe "$TALOSCTL" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${SECRETS_FILE}" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
@@ -56,9 +56,12 @@ def patch_file(filename, is_controlplane):
         return
     with open(filename, 'r') as f:
         docs = list(yaml.safe_load_all(f))
+    # Filter out HostnameConfig (RE-APPLIED)
+    docs = [d for d in docs if d.get('kind') != 'HostnameConfig']
+    # Filter out HostnameConfig (not needed for machine config and causes apply issues)
+    docs = [d for d in docs if d.get('kind') != 'HostnameConfig']
     print(f"Loaded {len(docs)} documents.")
     for data in docs:
-        if data.get('kind') == 'HostnameConfig': continue
         
         # 1. Cloud Provider
         if 'cluster' not in data: data['cluster'] = {}
@@ -158,7 +161,12 @@ def patch_file(filename, is_controlplane):
             if 'cluster' not in data: data['cluster'] = {}
             if 'controllerManager' not in data['cluster']: data['cluster']['controllerManager'] = {}
             if 'extraArgs' not in data['cluster']['controllerManager']: data['cluster']['controllerManager']['extraArgs'] = {}
-            data['cluster']['controllerManager']['extraArgs']['allocate-node-cidrs'] = "false"
+            # CRITICAL: Disable KCM allocation if using Native Routing (CCM handles it)
+            # This prevents Split-Brain routing where KCM and CCM race to assign PodCIDRs.
+            if "${CILIUM_ROUTING_MODE}" == "native":
+                data['cluster']['controllerManager']['extraArgs']['allocate-node-cidrs'] = "false"
+            else:
+                data['cluster']['controllerManager']['extraArgs']['allocate-node-cidrs'] = "${ALLOCATE_NODE_CIDRS}"
 
         # Prepare Network Interfaces
         if 'machine' not in data: data['machine'] = {}
@@ -185,13 +193,25 @@ def patch_file(filename, is_controlplane):
             nic1['dhcp'] = True
             nic1['mtu'] = 1460
 
+        # 8.7 Custom Worker Ports - DISABLED (Causes Schema Validation Error)
+        # if not is_controlplane:
+        #     worker_open_tcp_ports = "${WORKER_OPEN_TCP_PORTS}"
+        #     if worker_open_tcp_ports:
+        #         # logic removed
+        #         pass
+
     with open(filename, 'w') as f:
-        yaml.safe_dump_all(docs, f)
+        yaml.safe_dump_all(docs, f, sort_keys=False)
 
 patch_file("${OUTPUT_DIR}/controlplane.yaml", True)
 patch_file("${OUTPUT_DIR}/worker.yaml", False)
 PYEOF
     run_safe python3 "${OUTPUT_DIR}/patch_config.py"
+
+    # 5. Validate Configs
+    validate_talos_config "${OUTPUT_DIR}/controlplane.yaml" "machine"
+    validate_talos_config "${OUTPUT_DIR}/worker.yaml" "machine"
+    validate_talos_config "${OUTPUT_DIR}/talosconfig" "client"
 }
 
 

@@ -247,7 +247,7 @@ check_quotas() {
     # Returns "CPUS" (Global) or specific family metric (e.g., N2_CPUS)
     get_quota_metric() {
         local mt="$1"
-        local family="$2"
+        local family="${2:-}"
 
         # Explicit Family Override (for custom types or when explicitly set)
         if [[ -n "$family" ]]; then
@@ -296,7 +296,7 @@ check_quotas() {
     
     # Add to Specific Family Metric (if not CPUS)
     if [ "$cp_metric" != "CPUS" ]; then
-        if [ -z "${REQUIRED_METRICS[$cp_metric]}" ]; then REQUIRED_METRICS["$cp_metric"]=0; fi
+        if [ -z "${REQUIRED_METRICS[$cp_metric]:-}" ]; then REQUIRED_METRICS["$cp_metric"]=0; fi
         REQUIRED_METRICS["$cp_metric"]=$((REQUIRED_METRICS["$cp_metric"] + (cp_vcpu * CP_COUNT)))
     fi
 
@@ -334,7 +334,7 @@ check_quotas() {
         REQUIRED_METRICS["CPUS"]=$((REQUIRED_METRICS["CPUS"] + (worker_vcpu * count)))
         
         if [ "$worker_metric" != "CPUS" ]; then
-            if [ -z "${REQUIRED_METRICS[$worker_metric]}" ]; then REQUIRED_METRICS["$worker_metric"]=0; fi
+            if [ -z "${REQUIRED_METRICS[$worker_metric]:-}" ]; then REQUIRED_METRICS["$worker_metric"]=0; fi
             REQUIRED_METRICS["$worker_metric"]=$((REQUIRED_METRICS["$worker_metric"] + (worker_vcpu * count)))
         fi
     done
@@ -480,4 +480,123 @@ detect_timezone() {
             echo "UTC"
             ;;
     esac
+}
+
+# Config Validation
+validate_talos_config() {
+    local config_file="$1"
+    local type="${2:-machine}" # machine or client
+
+    log "Validating ${type} config: ${config_file}..."
+
+    if [ ! -s "${config_file}" ]; then
+        error "Config file '${config_file}' is missing or empty."
+        return 1
+    fi
+
+    # Determine validation mode (Local vs Bastion)
+    local use_bastion="false"
+    if [ -n "${BASTION_NAME:-}" ]; then
+        # Check if Bastion is running and reachable (Optimistic check)
+        if gcloud compute instances describe "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --format="value(status)" 2>/dev/null | grep -q "RUNNING"; then
+             use_bastion="true"
+        fi
+    fi
+
+    if [ "$use_bastion" == "true" ]; then
+        log "  > validating on Bastion '${BASTION_NAME}'..."
+        
+        # Upload config to Bastion temp
+        local remote_path="/tmp/$(basename "${config_file}").val"
+        
+        if ! gcloud compute scp "${config_file}" "${BASTION_NAME}:${remote_path}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --quiet &>/dev/null; then
+            warn "Failed to upload config to Bastion. Falling back to local validation."
+            use_bastion="false"
+        else
+            # Run validation remotely
+            local validate_cmd
+            if [ "${type}" == "client" ]; then
+                # talosctl config info (client check)
+                validate_cmd="talosctl --talosconfig ${remote_path} config info >/dev/null"
+            else
+                # machine check
+                validate_cmd="talosctl validate --config ${remote_path} --mode metal"
+            fi
+            
+            if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "${validate_cmd}" -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null; then
+                 error "Remote validation failed for: ${config_file}"
+                 # Cleanup
+                 gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "rm -f ${remote_path}" -- -q &>/dev/null || true
+                 return 1
+            fi
+            
+            # Cleanup
+            gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "rm -f ${remote_path}" -- -q &>/dev/null || true
+            log "✅ Configuration '${config_file}' is valid (Verified on Bastion)."
+            return 0
+        fi
+    fi
+
+    # Fallback to Local Validation (if Bastion not available or upload failed)
+    log "  > validating locally..."
+    if [ "${type}" == "client" ]; then
+        if ! "$TALOSCTL" --talosconfig "${config_file}" config info &>/dev/null; then
+             error "Invalid client configuration: ${config_file}"
+             return 1
+        fi
+    else
+        if ! "$TALOSCTL" validate --config "${config_file}" --mode metal; then
+             error "Invalid machine configuration: ${config_file}"
+             return 1
+        fi
+    fi
+    
+    log "✅ Configuration '${config_file}' is valid (Verified Locally)."
+}
+
+# Verify Node Serial Console for Errors
+verify_node_log() {
+    local node_name="$1"
+    local zone="${2:-$ZONE}"
+    
+    log "Verifying serial console log for ${node_name}..."
+    
+    # Wait a bit for logs to populate if called immediately after creation
+    sleep 5
+    
+    local log_output
+    if ! log_output=$(gcloud compute instances get-serial-port-output "${node_name}" --zone "${zone}" --project="${PROJECT_ID}" 2>&1); then
+        warn "Failed to fetch serial logs for ${node_name}. It might be too early."
+        return 0 # Don't block deployment on API failure, but warn
+    fi
+    
+    # Check for specific failure signatures
+    local failure_patterns=("Kernel panic" "Call Trace" "segmentation fault" "oom-killer")
+    local found_errors=0
+    
+    for pattern in "${failure_patterns[@]}"; do
+        if echo "$log_output" | grep -Fq "$pattern"; then
+             error "CRITICAL: Found '$pattern' in ${node_name} logs!"
+             found_errors=1
+        fi
+    done
+    
+    if [ $found_errors -eq 1 ]; then
+        # Dump last 20 lines for context
+        error "Last 20 lines of serial console:"
+        echo "$log_output" | tail -n 20 | sed 's/^/[CONSOLE] /' >&2
+        return 1
+    fi
+    
+    # Check for success signature (optional, but good for confidence)
+    if echo "$log_output" | grep -Fq "Talos: boot sequence completed"; then
+        log "✅ ${node_name} booted successfully (Log signature found)."
+    elif echo "$log_output" | grep -Fq "phase: running"; then
+         log "✅ ${node_name} is running (Log signature found)."
+    else
+        # Not finding success isn't necessarily a failure (e.g. log rotation), but worth noting.
+        info "No explicit success signature found yet for ${node_name}, but no errors detected."
+    fi
+    
+    return 0
 }

@@ -27,6 +27,17 @@ apply() {
     # 2b. Apply Node Pool Labels/Taints
     apply_node_pool_labels
     
+    # 2c. Rook Ceph (Optional - Automation coverage)
+    if [ "${ROOK_ENABLE}" == "true" ]; then
+        source "${SCRIPT_DIR}/lib/rook.sh"
+        deploy_rook || return 1
+    fi
+
+    if [[ " ${PEER_WITH[@]} " =~ " rook-ceph " ]]; then
+        source "${SCRIPT_DIR}/lib/rook-external.sh"
+        deploy_rook_client || return 1
+    fi
+    
     # Update Schedule (Work Hours)
     update_schedule
     
