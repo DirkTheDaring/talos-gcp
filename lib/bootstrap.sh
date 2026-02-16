@@ -180,7 +180,7 @@ finalize_bastion_config() {
     # Final Step: Sync updated configs to /etc/skel for future admins
     # We revert talosconfig endpoint to VIP (ILB) before syncing, so admins use the stable address
     # (Bootstrap used Node IP, but we want VIP for long-term use)
-    local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
+    local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
     
     if [ -z "$CP_ILB_IP" ]; then
         error "Could not resolve Control Plane VIP (ILB IP). Cannot finalize Bastion config."

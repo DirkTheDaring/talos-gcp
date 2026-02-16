@@ -408,6 +408,30 @@ cleanup() {
              run_safe gcloud compute resource-policies delete -q "${SCHEDULE_POLICY_NAME}" --region="${REGION}" --project="${PROJECT_ID}" || warn "Failed to delete schedule policy."
         fi
     fi
+
+    # --- GCS Cleanup ---
+    log "Cleaning up GCS Bucket Artifacts..."
+    if [ -n "${BUCKET_NAME}" ] && [ -n "${CLUSTER_NAME}" ]; then
+        # secrets.yaml (Known)
+        if gsutil -q stat "${GCS_SECRETS_URI}" &>/dev/null; then
+            log "Deleting secrets.yaml from ${GCS_SECRETS_URI}..."
+            run_safe gsutil rm "${GCS_SECRETS_URI}" || warn "Failed to delete secrets.yaml."
+        fi
+
+        # talosconfig/kubeconfig (User Request / Safety)
+        # We assume standard paths gs://BUCKET/CLUSTER/filename
+        local GCS_BASE="gs://${BUCKET_NAME}/${CLUSTER_NAME}"
+        
+        if gsutil -q stat "${GCS_BASE}/talosconfig" &>/dev/null; then
+            log "Deleting talosconfig from bucket..."
+            run_safe gsutil rm "${GCS_BASE}/talosconfig" || true
+        fi
+        
+        if gsutil -q stat "${GCS_BASE}/kubeconfig" &>/dev/null; then
+            log "Deleting kubeconfig from bucket..."
+            run_safe gsutil rm "${GCS_BASE}/kubeconfig" || true
+        fi
+    fi
     
     if [ -n "${OUTPUT_DIR}" ] && [ "${OUTPUT_DIR}" != "/" ]; then
         rm -rf "${OUTPUT_DIR}" "patch_config.py"
