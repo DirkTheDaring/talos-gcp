@@ -43,6 +43,7 @@ ${YELLOW}Commands:${NC}
 
   ${BLUE}--- Networking ---${NC}
   ${GREEN}public-ip${NC}               Get the Public IP of the Bastion (if applicable)
+  ${GREEN}get-ips${NC}                 List External IPs (Ingress, Bastion, NAT)
   ${GREEN}list-ports${NC}              List currently configured worker port ranges
   ${GREEN}update-ports${NC}            Update worker port firewall rules from configuration
   ${GREEN}update-traefik${NC}          Update Traefik load balancer configuration
@@ -50,6 +51,7 @@ ${YELLOW}Commands:${NC}
   ${BLUE}--- Debugging & Maintenance ---${NC}
   ${GREEN}diagnose${NC}                Run a suite of diagnostic checks on the cluster
   ${GREEN}verify-connectivity${NC}     Verify internal cluster connectivity (PingMESH)
+  ${GREEN}verify-ccm${NC}              Verify Cloud Controller Manager (CCM) status
   ${GREEN}recreate-bastion${NC}        Destroy and recreate the Bastion host
   ${GREEN}update-labels${NC}           Update labels on GCP instances
   ${GREEN}list-instances${NC}          List all GCP instances associated with the cluster
