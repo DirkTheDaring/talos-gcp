@@ -526,3 +526,175 @@ apply_ingress() {
         prune_start=$((prune_start+1))
     done
 }
+
+fix_aliases() {
+    log "Synchronizing GCP Alias IPs with Kubernetes PodCIDRs..."
+    
+    # Check if native routing is enabled
+    if [ "${CILIUM_ROUTING_MODE:-}" != "native" ]; then
+        log "Native routing not enabled (CILIUM_ROUTING_MODE=${CILIUM_ROUTING_MODE:-}). Skipping Alias IP sync."
+        return 0
+    fi
+
+    # 1. Fetch K8s Data (Source of Truth) via Bastion
+    log "Fetching Node Data via Bastion..."
+    local k8s_output
+    if ! k8s_output=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.spec.podCIDR}{\"\n\"}{end}'" 2>/dev/null); then
+        warn "Failed to fetch node data from Bastion. Skipping Alias IP sync."
+        return 1
+    fi
+
+    # 2. Fetch GCP Data (Current State) - Bulk Fetch
+    log "Fetching current GCP Alias IPs..."
+    local gcp_output
+    if ! gcp_output=$(gcloud compute instances list --filter="name:(${CLUSTER_NAME}-*) AND zone:(${ZONE})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
+        warn "Failed to fetch instance data from GCP. Skipping."
+        return 1
+    fi
+
+    # 3. Parse into Associative Arrays (Bash 4+)
+    declare -A k8s_cidrs
+    declare -A gcp_aliases
+    
+    # Parse K8s Data
+    while read -r name cidr; do
+        if [ -n "$name" ]; then k8s_cidrs["$name"]="$cidr"; fi
+    done <<< "$k8s_output"
+
+    # Parse GCP Data
+    while read -r name alias_ip; do
+        if [ -n "$name" ]; then gcp_aliases["$name"]="$alias_ip"; fi
+    done <<< "$gcp_output"
+
+    local changes_made=0
+
+    # --- Phase 1: Clear Mismatches (Solve Conflicts) ---
+    # We loop through GCP nodes that we found
+    for node in "${!gcp_aliases[@]}"; do
+        local current="${gcp_aliases[$node]}"
+        local target="${k8s_cidrs[$node]}" # Might be empty if not in K8s list or no PodCIDR
+        
+        # If we have a current alias, but it doesn't match the target
+        if [ -n "$current" ] && [ "$current" != "$target" ]; then
+             log "Mismatch for $node: Current='$current', Target='${target:-none}'. Clearing..."
+             run_safe gcloud compute instances network-interfaces update "$node" --zone "$ZONE" --project="$PROJECT_ID" --aliases ""
+             gcp_aliases["$node"]="" # Update local state
+             ((changes_made++))
+        fi
+    done
+
+    # --- Phase 2: Set Correct Aliases ---
+    for node in "${!k8s_cidrs[@]}"; do
+        local target="${k8s_cidrs[$node]}"
+        local current="${gcp_aliases[$node]}"
+        
+        # Only proceed if we have a valid target CIDR
+        if [ -n "$target" ] && [ "$target" != "<none>" ]; then
+            if [ "$current" != "$target" ]; then
+                log "Setting Alias IP for $node to $target..."
+                run_safe gcloud compute instances network-interfaces update "$node" --zone "$ZONE" --project="$PROJECT_ID" --aliases "pods:${target}"
+                ((changes_made++))
+            fi
+        fi
+    done
+    
+    if [ $changes_made -eq 0 ]; then
+        log "All Alias IPs are correct. No changes made."
+    else
+        log "Alias IP synchronization complete ($changes_made updates)."
+    fi
+}
+
+reset_aliases() {
+    log "RESETTING GCP Alias IPs for all cluster nodes..."
+    
+    # Check if native routing is enabled
+    if [ "${CILIUM_ROUTING_MODE:-}" != "native" ]; then
+        warn "Native routing not enabled (CILIUM_ROUTING_MODE=${CILIUM_ROUTING_MODE:-}). Resetting aliases is not applicable."
+        return 0
+    fi
+    
+    warn "This will remove ALL Alias IPs from nodes. Pod connectivity will be interrupted until 'fix-aliases' is run."
+    
+    echo -n "Are you sure you want to proceed? [y/N] "
+    read -r response
+    if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+        log "Reset aborted."
+        return 0
+    fi
+    
+    log "Pruning all Alias IPs..."
+    
+    # Bulk Fetch
+    local gcp_output
+    if ! gcp_output=$(gcloud compute instances list --filter="name:(${CLUSTER_NAME}-*) AND zone:(${ZONE})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
+        warn "Failed to fetch instance data from GCP."
+        return 1
+    fi
+    
+    local count=0
+    # Loop and Clear
+    while read -r name alias_ip; do
+        if [ -n "$name" ] && [ -n "$alias_ip" ]; then
+             log "Clearing Alias IP for $name (was $alias_ip)..."
+             run_safe gcloud compute instances network-interfaces update "$name" --zone "$ZONE" --project="${PROJECT_ID}" --aliases ""
+             ((count++))
+        fi
+    done <<< "$gcp_output"
+    
+    if [ $count -gt 0 ]; then
+        log "Reset complete. Pruned aliases from $count nodes."
+    else
+        log "No aliases found to prune."
+    fi
+}
+
+# Smart Collision Resolution
+resolve_collisions() {
+    log "Checking for GCP Alias IP collisions..."
+
+    # Check if native routing is enabled
+    if [ "${CILIUM_ROUTING_MODE:-}" != "native" ]; then
+        log "Native routing not enabled (CILIUM_ROUTING_MODE=${CILIUM_ROUTING_MODE:-}). Skipping collision check."
+        return 0
+    fi
+    
+    # 1. Fetch Name and Alias for ALL nodes in zone (to catch cross-cluster or stale collisions)
+    local gcp_output
+    if ! gcp_output=$(gcloud compute instances list --filter="zone:(${ZONE})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
+        warn "Failed to fetch instance data. Skipping collision check."
+        return 0
+    fi
+
+    # 2. Map Alias -> Nodes (Bash 4+ Associative Array)
+    declare -A ip_map
+    local collision_found=false
+
+    # Read into map
+    while read -r name alias_ip; do
+        if [ -z "$alias_ip" ]; then continue; fi
+        
+        if [ -n "${ip_map[$alias_ip]}" ]; then
+            # COLLISION DETECTED!
+            local other_node="${ip_map[$alias_ip]}"
+            log "CRITICAL: IP Collision detected! Alias $alias_ip is claimed by $other_node AND $name."
+            
+            # Action: Clear BOTH to be safe and restore primary IP connectivity
+            log "Resolving: Clearing alias from $other_node..."
+            run_safe gcloud compute instances network-interfaces update "$other_node" --zone "$ZONE" --project="${PROJECT_ID}" --aliases ""
+            
+            log "Resolving: Clearing alias from $name..."
+            run_safe gcloud compute instances network-interfaces update "$name" --zone "$ZONE" --project="${PROJECT_ID}" --aliases ""
+            
+            collision_found=true
+        else
+            ip_map["$alias_ip"]="$name"
+        fi
+    done <<< "$gcp_output"
+
+    if [ "$collision_found" = true ]; then
+        log "Collisions resolved. Networking should be reachable."
+    else
+        log "No Alias IP collisions detected."
+    fi
+}

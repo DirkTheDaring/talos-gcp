@@ -165,15 +165,24 @@ import subprocess
 import json
 import sys
 
-def get_osd_nodes():
+def get_nodes_info(label_selector):
+    """Returns list of dicts {name, ip} for nodes matching label."""
     try:
-        # Get nodes with label role=ceph-osd
-        cmd = ["kubectl", "get", "nodes", "-l", "role=ceph-osd", "-o", "json"]
+        cmd = ["kubectl", "get", "nodes", "-l", label_selector, "-o", "json"]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         data = json.loads(result.stdout)
-        return [item['metadata']['name'] for item in data.get('items', [])]
+        nodes = []
+        for item in data.get('items', []):
+            name = item['metadata']['name']
+            ip = None
+            for addr in item.get('status', {}).get('addresses', []):
+                if addr['type'] == 'InternalIP':
+                    ip = addr['address']
+                    break
+            nodes.append({'name': name, 'ip': ip})
+        return nodes
     except subprocess.CalledProcessError as e:
-        print(f"Error getting nodes: {e}", file=sys.stderr)
+        print(f"Error getting nodes ({label_selector}): {e}", file=sys.stderr)
         return []
 
 def get_disk_path(device_name, disk_config_str):
@@ -207,36 +216,37 @@ def parse_size_to_bytes(size_str):
     except ValueError:
         return 0
 
+def get_osd_nodes():
+    return [n['name'] for n in get_nodes_info("role=ceph-osd")]
+
 def generate_values():
     data_device = os.environ.get('ROOK_DATA_DEVICE_NAME')
     metadata_device = os.environ.get('ROOK_METADATA_DEVICE_NAME')
     storage_cidr = os.environ.get('STORAGE_CIDR')
     disk_config = os.environ.get('ROOK_DISK_CONFIG')
+    
+    # Resource Limits (with defaults if unset or empty)
+    osd_memory_limit_str = os.environ.get('ROOK_OSD_MEMORY') or '4Gi'
+    osd_cpu_limit = os.environ.get('ROOK_OSD_CPU') or '2000m'
+    mds_memory_limit = os.environ.get('ROOK_MDS_MEMORY') or '1Gi'
+    mds_cpu_limit = os.environ.get('ROOK_MDS_CPU') or '500m'
 
     if not data_device:
         print("Error: ROOK_DATA_DEVICE_NAME not set.", file=sys.stderr)
         sys.exit(1)
 
-    nodes = get_osd_nodes()
-    if not nodes:
-        print("Warning: No nodes found with label role=ceph-osd. Cluster might be empty.", file=sys.stderr)
-    
-    # Build Storage Nodes Config
-    storage_nodes = []
-    
-    # Pre-calculate paths
-    data_dev_path = get_disk_path(data_device, disk_config)
-    meta_dev_path = None
-    if metadata_device:
-        meta_dev_path = get_disk_path(metadata_device, disk_config)
-        
-    print(f"Resolved Data Device '{data_device}' to: {data_dev_path}")
-    if meta_dev_path:
-        print(f"Resolved Metadata Device '{metadata_device}' to: {meta_dev_path}")
+    # Get Monitor IPs (role=ceph-mon)
+    mon_label = "role=ceph-mon"
+    mon_nodes_info = get_nodes_info(mon_label)
 
-    mon_nodes_info = get_osd_nodes_info()
+    if not mon_nodes_info:
+        # Fallback to osd nodes if mon nodes specific label missing (converged)
+        mon_label = "role=ceph-osd"
+        mon_nodes_info = get_nodes_info(mon_label)
+        
     mon_ips = [n['ip'] for n in mon_nodes_info if n['ip']]
     mon_host_str = ','.join(mon_ips)
+    print(f"Monitor Hosts: {mon_host_str}")
 
     osd_nodes = get_osd_nodes()
     storage_nodes = []
@@ -256,18 +266,21 @@ def generate_values():
         storage_nodes.append(node_config)
 
     osd_memory_bytes = parse_size_to_bytes(osd_memory_limit_str)
-    osd_memory_target = int(osd_memory_bytes * 0.8)
+    osd_memory_bytes = parse_size_to_bytes(osd_memory_limit_str)
     
     fs_spec = {
         'metadataServer': {
             'activeCount': 1, 
             'activeStandby': True, 
-            'resources': {'limits': {'cpu': '500m', 'memory': '1Gi'}, 'requests': {'cpu': '100m', 'memory': '512Mi'}}
+            'resources': {'limits': {'cpu': mds_cpu_limit, 'memory': mds_memory_limit}, 'requests': {'cpu': '100m', 'memory': '512Mi'}}
         },
         'metadataPool': {'replicated': {'size': 3}},
         'dataPools': [{'failureDomain': 'host', 'replicated': {'size': 3}, 'name': 'data0'}]
     }
     
+    # Toleration/Affinity value depends on label
+    mon_role_value = mon_label.split('=')[1]
+
     values = {
         'cephClusterSpec': {
             'cephVersion': {'image': 'quay.io/ceph/ceph:v18.2.4'},
@@ -280,24 +293,40 @@ def generate_values():
             'resources': {
                 'mon': {'limits': {'cpu': '1000m', 'memory': '2Gi'}, 'requests': {'cpu': '100m', 'memory': '512Mi'}},
                 'mgr': {'limits': {'cpu': '500m', 'memory': '1Gi'}, 'requests': {'cpu': '100m', 'memory': '512Mi'}},
+                'osd': {'limits': {'cpu': osd_cpu_limit, 'memory': osd_memory_limit_str}, 'requests': {'cpu': '100m', 'memory': '512Mi'}}
             },
             'storage': {'useAllNodes': False, 'useAllDevices': False, 'nodes': storage_nodes},
             'placement': {
                 'mon': {
-                    'tolerations': [{'key': 'role', 'operator': 'Equal', 'value': 'ceph-mon', 'effect': 'NoSchedule'}],
-                    'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [{'matchExpressions': [{'key': 'role', 'operator': 'In', 'values': ['ceph-mon']}]}]}}
+                    'tolerations': [{'key': 'role', 'operator': 'Equal', 'value': mon_role_value, 'effect': 'NoSchedule'}],
+                    'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [{'matchExpressions': [{'key': 'role', 'operator': 'In', 'values': [mon_role_value]}]}]}}
                 },
                 'mgr': {
-                    'tolerations': [{'key': 'role', 'operator': 'Equal', 'value': 'ceph-mon', 'effect': 'NoSchedule'}],
-                    'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [{'matchExpressions': [{'key': 'role', 'operator': 'In', 'values': ['ceph-mon']}]}]}}
+                    'tolerations': [{'key': 'role', 'operator': 'Equal', 'value': mon_role_value, 'effect': 'NoSchedule'}],
+                    'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [{'matchExpressions': [{'key': 'role', 'operator': 'In', 'values': [mon_role_value]}]}]}}
                 }
             }
         },
-        'configOverride': f'''[global]
-mon_host = {mon_host_str}
-osd_memory_target = {osd_memory_target}
-''',
+        'configOverride': None,
         'cephFileSystems': [{'name': 'ceph-filesystem', 'spec': fs_spec, 'storageClass': {'enabled': True, 'isDefault': True, 'name': 'ceph-filesystem', 'pool': 'ceph-filesystem-data0', 'reclaimPolicy': 'Delete', 'allowVolumeExpansion': True}}],
+        'cephBlockPools': [{
+            'name': 'ceph-blockpool',
+            'spec': {
+                'failureDomain': 'host',
+                'replicated': {'size': 3}
+            },
+            'storageClass': {
+                'enabled': True,
+                'name': 'ceph-block',
+                'isDefault': False,
+                'reclaimPolicy': 'Delete',
+                'allowVolumeExpansion': True,
+                'parameters': {
+                    'imageFormat': '2',
+                    'imageFeatures': 'layering' # simplified features for broad kernel support
+                }
+            }
+        }],
         'toolbox': {'enabled': True},
         'monitoring': {'enabled': True}
     }
@@ -351,6 +380,7 @@ EOF
         
         helm upgrade --install --namespace rook-ceph rook-ceph-cluster rook-release/rook-ceph-cluster \\
             --version ${ROOK_CHART_VERSION} \\
+            --reset-values \\
             --values rook-values.yaml
     "
     
@@ -380,11 +410,11 @@ install_ceph_client() {
 
         # Wait for Secret
         echo 'Waiting for rook-ceph-admin-keyring secret...'
-        for i in {1..30}; do
+        for i in {1..60}; do
             if kubectl -n rook-ceph get secret rook-ceph-admin-keyring &>/dev/null; then
                 break
             fi
-            echo "Attempt \$i/30: Secret not found. Waiting 10s..."
+            echo \"Attempt \$i/60: Secret not found. Waiting 10s...\"
             sleep 10
         done
 
@@ -403,12 +433,12 @@ install_ceph_client() {
 
         # Wait for CephCluster
         echo 'Waiting for CephCluster FSID...'
-        for i in {1..30}; do
+        for i in {1..60}; do
             FSID=\$(kubectl -n rook-ceph get cephcluster rook-ceph -o jsonpath='{.status.ceph.fsid}' 2>/dev/null)
             if [ -n \"\$FSID\" ]; then
                 break
             fi
-            echo "Attempt \$i/30: FSID not ready. Waiting 10s..."
+            echo \"Attempt \$i/60: FSID not ready. Waiting 10s...\"
             sleep 10
         done
 
@@ -419,12 +449,12 @@ install_ceph_client() {
         
         # Get endpoints from ConfigMap (val=IP:port,...) and strip names
         echo 'Waiting for mon-endpoints ConfigMap...'
-        for i in {1..30}; do
+        for i in {1..60}; do
             MON_DATA=\$(kubectl -n rook-ceph get cm rook-ceph-mon-endpoints -o jsonpath='{.data.data}' 2>/dev/null)
             if [ -n \"\$MON_DATA\" ]; then
                 break
             fi
-            echo "Attempt \$i/30: ConfigMap not ready. Waiting 10s..."
+            echo \"Attempt \$i/60: ConfigMap not ready. Waiting 10s...\"
             sleep 10
         done
 

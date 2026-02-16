@@ -163,12 +163,20 @@ deploy_all() {
     # 4. Wait for Control Plane to be RUNNING
     wait_for_controlplane || return 1
     
+    # 4b. Ensure Clean Networking (Resolve Collisions)
+    # Checks for duplicate Alias IPs which break routing and clears them on both nodes.
+    # This allows connectivity to trigger configuration/bootstrap.
+    resolve_collisions
+
     # 5. Configure Bastion (and push initial configs)
     configure_bastion || return 1
     
     # 6. Bootstrap & Kubeconfig
     bootstrap_etcd || return 1
     
+    # 6b. Early Networking Fix (Ensure CP Aliases are correct before CNI)
+    fix_aliases
+
     # 7. K8s Networking (VIP Alias & CNI)
     provision_k8s_networking || return 1
     
@@ -177,6 +185,10 @@ deploy_all() {
     
     # 9. Workers (Created only AFTER CNI is ready)
     provision_workers || return 1
+
+    # Ensure Native Routing Aliases are correct (Fix for GCP inconsistencies)
+    # 9a. Fix Aliases (Immediately after workers are created)
+    fix_aliases
 
     # 9b. Apply Node Pool Labels/Taints
     # We do this after provisioning, though nodes might not be ready instantly.

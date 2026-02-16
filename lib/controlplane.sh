@@ -12,6 +12,8 @@ generate_talos_configs() {
     fi
     log "Using Control Plane VIP: ${CP_ILB_IP}"
 
+
+
     # 2. Secrets
     local SECRETS_FILE="${OUTPUT_DIR}/secrets.yaml"
     if gsutil -q stat "${GCS_SECRETS_URI}"; then
@@ -20,13 +22,7 @@ generate_talos_configs() {
     else
         log "Generating new secrets..."
         rm -f "${SECRETS_FILE}"
-        if command -v podman &> /dev/null; then
-             run_safe podman run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen secrets -o secrets.yaml
-        elif command -v docker &> /dev/null; then
-             run_safe docker run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen secrets -o secrets.yaml
-        else
-             run_safe "$TALOSCTL" gen secrets -o "${SECRETS_FILE}"
-        fi
+        run_safe "$TALOSCTL" gen secrets -o "${SECRETS_FILE}"
         run_safe gsutil cp "${SECRETS_FILE}" "${GCS_SECRETS_URI}"
     fi
     chmod 600 "${SECRETS_FILE}"
@@ -35,13 +31,7 @@ generate_talos_configs() {
     log "Generating Configs (Endpoint: https://${CP_ILB_IP}:6443)..."
     rm -f "${OUTPUT_DIR}/controlplane.yaml" "${OUTPUT_DIR}/worker.yaml" "${OUTPUT_DIR}/talosconfig"
     
-    if [ -z "${TALOSCTL_FORCE_BINARY:-}" ] && command -v podman &> /dev/null; then
-        run_safe podman run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
-    elif [ -z "${TALOSCTL_FORCE_BINARY:-}" ] && command -v docker &> /dev/null; then
-        run_safe docker run --rm -v "${OUTPUT_DIR}:/out:Z" -w /out "ghcr.io/siderolabs/talosctl:${CP_TALOS_VERSION}" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets secrets.yaml --with-docs=false --with-examples=false
-    else
-        run_safe "$TALOSCTL" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${SECRETS_FILE}" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
-    fi
+    run_safe "$TALOSCTL" gen config "${CLUSTER_NAME}" "https://${CP_ILB_IP}:6443" --with-secrets "${SECRETS_FILE}" --with-docs=false --with-examples=false --output-dir "${OUTPUT_DIR}"
 
     # 4. Patch Configs
     cat <<PYEOF > "${OUTPUT_DIR}/patch_config.py"

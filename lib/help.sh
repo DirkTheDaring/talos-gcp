@@ -45,8 +45,11 @@ ${YELLOW}Commands:${NC}
   ${GREEN}public-ip${NC}               Get the Public IP of the Bastion (if applicable)
   ${GREEN}get-ips${NC}                 List External IPs (Ingress, Bastion, NAT)
   ${GREEN}list-ports${NC}              List currently configured worker port ranges
-  ${GREEN}update-ports${NC}            Update worker port firewall rules from configuration
+  ${GREEN}update-ports${NC}            Update worker port firewall ranges
   ${GREEN}update-traefik${NC}          Update Traefik load balancer configuration
+  ${GREEN}fix-aliases${NC}             Fix GCP Alias IP vs K8s PodCIDR mismatches
+  ${GREEN}reset-aliases${NC}           (Dangerous) Clear all Alias IPs from cluster nodes
+  ${GREEN}update-cilium${NC}           Update Cilium CNI configuration
   
   ${BLUE}--- Debugging & Maintenance ---${NC}
   ${GREEN}diagnose${NC}                Run a suite of diagnostic checks on the cluster

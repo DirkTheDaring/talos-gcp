@@ -299,6 +299,21 @@ case "$COMMAND" in
         check_dependencies
         update_schedule
         ;;
+    fix-aliases)
+        set_names
+        check_dependencies
+        export KUBECONFIG="${OUTPUT_DIR}/kubeconfig"
+        if [ ! -f "$KUBECONFIG" ]; then
+             export KUBECONFIG="_out/${CLUSTER_NAME}/kubeconfig"
+        fi
+        
+        fix_aliases
+        ;;
+    reset-aliases)
+        set_names
+        check_dependencies
+        reset_aliases
+        ;;
     install-ceph-client)
         set_names
         check_dependencies
