@@ -674,7 +674,7 @@ resolve_collisions() {
     while read -r name alias_ip; do
         if [ -z "$alias_ip" ]; then continue; fi
         
-        if [ -n "${ip_map[$alias_ip]}" ]; then
+        if [ -n "${ip_map[$alias_ip]:-}" ]; then
             # COLLISION DETECTED!
             local other_node="${ip_map[$alias_ip]}"
             log "CRITICAL: IP Collision detected! Alias $alias_ip is claimed by $other_node AND $name."
