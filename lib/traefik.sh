@@ -48,6 +48,12 @@ update_traefik() {
 service:
   spec:
     loadBalancerIP: ${traefik_ip}
+logs:
+  access:
+    enabled: true
+    fields:
+      headers:
+        defaultmode: keep
 EOF
 
     # Copy to Bastion

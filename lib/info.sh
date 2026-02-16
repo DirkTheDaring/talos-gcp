@@ -44,8 +44,6 @@ list_clusters() {
         if [ -z "$K8S_VER" ]; then K8S_VER="unknown"; fi
         if [ -z "$CILIUM_VER" ]; then CILIUM_VER="unknown"; fi
         
-
-        
         # Determine Region
         local CLUSTER_REGION="${CLUSTER_ZONE%-*}"
 
@@ -139,6 +137,82 @@ list_ports() {
         ) | @tsv' | \
     column -t
         
+    echo ""
+}
+
+get_ips() {
+    set_names
+    check_dependencies
+    
+    log "Retrieving Public IPs for cluster '${CLUSTER_NAME}' (Project: ${PROJECT_ID}, Region: ${REGION})..."
+    echo ""
+    
+    # Initialize Table Data
+    # Format: TYPE | NAME | IP_ADDRESS | DESCRIPTION
+    local TABLE_DATA="TYPE\tNAME\tIP_ADDRESS\tDESCRIPTION\n"
+    
+    # 1. Ingress IPs (Forwarding Rules)
+    log "  -> Fetching Ingress IPs..."
+    local INGRESS_IPS
+    INGRESS_IPS=$(gcloud compute addresses list \
+        --filter="name~'${CLUSTER_NAME}-ingress.*' AND region:(${REGION})" \
+        --project="${PROJECT_ID}" \
+        --format="value(name, address)")
+        
+    if [ -n "$INGRESS_IPS" ]; then
+        while read -r name ip; do
+            TABLE_DATA+="${GREEN}Ingress${NC}\t${name}\t${ip}\tLoadBalancer IP\n"
+        done <<< "$INGRESS_IPS"
+    else
+         TABLE_DATA+="${YELLOW}Ingress${NC}\t-\t-\tNo Ingress IPs found\n"
+    fi
+
+    # 2. Bastion IP
+    log "  -> Fetching Bastion IP..."
+    local BASTION_INFO
+    BASTION_INFO=$(gcloud compute instances describe "${CLUSTER_NAME}-bastion" \
+        --zone "${ZONE}" \
+        --project="${PROJECT_ID}" \
+        --format="value(networkInterfaces[0].accessConfigs[0].natIP)" 2>/dev/null)
+        
+    if [ -n "$BASTION_INFO" ]; then
+        TABLE_DATA+="${GREEN}Bastion${NC}\t${CLUSTER_NAME}-bastion\t${BASTION_INFO}\tSSH Jump Host\n"
+    else
+        TABLE_DATA+="${YELLOW}Bastion${NC}\t${CLUSTER_NAME}-bastion\t-\tNo External IP / Instance not found\n"
+    fi
+     
+    # 3. Cloud NAT IPs
+    log "  -> Fetching Cloud NAT IPs..."
+    # First, find the router. Usually named ${CLUSTER_NAME}-router
+    local ROUTER_NAME="${CLUSTER_NAME}-router"
+    
+    # Check if router exists
+    if gcloud compute routers describe "${ROUTER_NAME}" --region="${REGION}" --project="${PROJECT_ID}" &>/dev/null; then
+        # Get NAT Status
+        local NAT_IPS
+        NAT_IPS=$(gcloud compute routers get-status "${ROUTER_NAME}" \
+            --region="${REGION}" \
+            --project="${PROJECT_ID}" \
+            --format="value(result.natStatus[].autoAllocatedNatIps, result.natStatus[].userAllocatedNatIps)" 2>/dev/null)
+            
+        # Clean up output (gcloud returns list as semicolon or comma separated depending on version/format)
+        # We replace delimiters with spaces
+        NAT_IPS=$(echo "$NAT_IPS" | tr ';,' ' ')
+        
+        if [ -n "$NAT_IPS" ]; then
+            for ip in $NAT_IPS; do
+                TABLE_DATA+="${GREEN}Cloud NAT${NC}\t${ROUTER_NAME}\t${ip}\tOutbound Traffic IP\n"
+            done
+        else
+             TABLE_DATA+="${YELLOW}Cloud NAT${NC}\t${ROUTER_NAME}\t-\tNo Active NAT IPs found\n"
+        fi
+    else
+        TABLE_DATA+="${YELLOW}Cloud NAT${NC}\t-\t-\tRouter '${ROUTER_NAME}' not found\n"
+    fi
+
+    echo ""
+    # Print Table using column
+    echo -e "$TABLE_DATA" | column -t -s $'\t'
     echo ""
 }
 

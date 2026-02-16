@@ -325,6 +325,9 @@ case "$COMMAND" in
         # check_dependencies - Not needed
         access_info
         ;;
+    get-ips)
+        get_ips
+        ;;
     verify-access)
         set_names
         check_dependencies

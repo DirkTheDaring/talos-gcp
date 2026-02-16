@@ -209,164 +209,79 @@ def generate_values():
     if meta_dev_path:
         print(f"Resolved Metadata Device '{metadata_device}' to: {meta_dev_path}")
 
-    for node in nodes:
-        node_config = {
-            "name": node,
-            "devices": [
-                {
-                    "name": data_dev_path,
-                    "config": {}
-                }
-            ]
-        }
+    mon_nodes_info = get_osd_nodes_info()
+    mon_ips = [n['ip'] for n in mon_nodes_info if n['ip']]
+    mon_host_str = ','.join(mon_ips)
+
+    osd_nodes = get_osd_nodes()
+    storage_nodes = []
+    
+    data_dev_path = get_disk_path(data_device, disk_config)
+    meta_dev_path = None
+    if metadata_device:
+        meta_dev_path = get_disk_path(metadata_device, disk_config)
         
-        # Add metadata device if configured
+    for node in osd_nodes:
+        node_config = {
+            'name': node,
+            'devices': [{'name': data_dev_path, 'config': {}}]
+        }
         if meta_dev_path:
-            node_config["devices"][0]["config"]["metadataDevice"] = meta_dev_path
-            
+            node_config['devices'][0]['config']['metadataDevice'] = meta_dev_path
         storage_nodes.append(node_config)
 
-    # Calculate osd_memory_target (approx 80% of container limit or default to 2Gi -> ~1.6Gi target)
-    osd_memory_limit_str = os.environ.get('ROOK_OSD_MEMORY', '2Gi')
     osd_memory_bytes = parse_size_to_bytes(osd_memory_limit_str)
-    # Set target to 80% of limit to leave room for overhead
     osd_memory_target = int(osd_memory_bytes * 0.8)
     
+    fs_spec = {
+        'metadataServer': {
+            'activeCount': 1, 
+            'activeStandby': True, 
+            'resources': {'limits': {'cpu': '500m', 'memory': '1Gi'}, 'requests': {'cpu': '100m', 'memory': '512Mi'}}
+        },
+        'metadataPool': {'replicated': {'size': 3}},
+        'dataPools': [{'failureDomain': 'host', 'replicated': {'size': 3}, 'name': 'data0'}]
+    }
+    
     values = {
-        "cephClusterSpec": {
-            "cephVersion": {
-                "image": "quay.io/ceph/ceph:v18.2.4"
+        'cephClusterSpec': {
+            'cephVersion': {'image': 'quay.io/ceph/ceph:v18.2.4'},
+            'mon': {'count': 3, 'allowMultiplePerNode': False},
+            'mgr': {'count': 2, 'allowMultiplePerNode': False},
+            'cleanupPolicy': {
+                'sanitizeDisks': {'method': 'quick', 'dataSource': 'zero', 'iteration': 1},
+                'wipeDevicesFromOtherClusters': True
             },
-            "mon": {
-                "count": 3,
-                "allowMultiplePerNode": False
+            'resources': {
+                'mon': {'limits': {'cpu': '1000m', 'memory': '2Gi'}, 'requests': {'cpu': '100m', 'memory': '512Mi'}},
+                'mgr': {'limits': {'cpu': '500m', 'memory': '1Gi'}, 'requests': {'cpu': '100m', 'memory': '512Mi'}},
             },
-            "mgr": {
-                "count": 2,
-                "allowMultiplePerNode": False
-            },
-            "storage": {
-                "useAllNodes": False,
-                "useAllDevices": False,
-                "nodes": storage_nodes
-            },
-            "placement": {
-                "mon": {
-                    "tolerations": [
-                        {
-                            "key": "role",
-                            "operator": "Equal",
-                            "value": "ceph-mon",
-                            "effect": "NoSchedule"
-                        }
-                    ],
-                    "nodeAffinity": {
-                        "requiredDuringSchedulingIgnoredDuringExecution": {
-                            "nodeSelectorTerms": [
-                                {
-                                    "matchExpressions": [
-                                        {
-                                            "key": "role",
-                                            "operator": "In",
-                                            "values": ["ceph-mon"]
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    }
+            'storage': {'useAllNodes': False, 'useAllDevices': False, 'nodes': storage_nodes},
+            'placement': {
+                'mon': {
+                    'tolerations': [{'key': 'role', 'operator': 'Equal', 'value': 'ceph-mon', 'effect': 'NoSchedule'}],
+                    'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [{'matchExpressions': [{'key': 'role', 'operator': 'In', 'values': ['ceph-mon']}]}]}}
                 },
-                "mgr": {
-                    "tolerations": [
-                        {
-                            "key": "role",
-                            "operator": "Equal",
-                            "value": "ceph-mon",
-                            "effect": "NoSchedule"
-                        }
-                    ],
-                    "nodeAffinity": {
-                        "requiredDuringSchedulingIgnoredDuringExecution": {
-                            "nodeSelectorTerms": [
-                                {
-                                    "matchExpressions": [
-                                        {
-                                            "key": "role",
-                                            "operator": "In",
-                                            "values": ["ceph-mon"]
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    }
+                'mgr': {
+                    'tolerations': [{'key': 'role', 'operator': 'Equal', 'value': 'ceph-mon', 'effect': 'NoSchedule'}],
+                    'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [{'matchExpressions': [{'key': 'role', 'operator': 'In', 'values': ['ceph-mon']}]}]}}
                 }
             }
         },
-        "configOverride": f"""[global]
-mon_host = rook-ceph-mon-a.rook-ceph.svc,rook-ceph-mon-b.rook-ceph.svc,rook-ceph-mon-c.rook-ceph.svc
+        'configOverride': f'''[global]
+mon_host = {mon_host_str}
 osd_memory_target = {osd_memory_target}
-""",
-        "cephFileSystems": [
-            {
-                "name": "ceph-filesystem",
-                "spec": {
-                    "metadataServer": {
-                        "activeCount": 1,
-                        "activeStandby": True,
-                        "resources": {
-                            "limits": {
-                                "cpu": os.environ.get('ROOK_MDS_CPU', '3'),
-                                "memory": os.environ.get('ROOK_MDS_MEMORY', '4Gi')
-                            },
-                            "requests": {
-                                "cpu": os.environ.get('ROOK_MDS_CPU', '3'),
-                                "memory": os.environ.get('ROOK_MDS_MEMORY', '4Gi')
-                            }
-                        }
-                    },
-                    "metadataPool": {
-                        "replicated": {
-                            "size": 3
-                        }
-                    },
-                    "dataPools": [
-                        {
-                            "failureDomain": "host",
-                            "replicated": {
-                                "size": 3
-                            },
-                            "name": "data0"
-                        }
-                    ]
-                },
-                "storageClass": {
-                    "enabled": True,
-                    "isDefault": True,
-                    "name": "ceph-filesystem",
-                    "pool": "ceph-filesystem-data0",
-                    "reclaimPolicy": "Delete",
-                    "allowVolumeExpansion": True
-                }
-            }
-        ],
-        "toolbox": {
-            "enabled": True 
-        },
-        "monitoring": {
-            "enabled": True
-        }
+''',
+        'cephFileSystems': [{'name': 'ceph-filesystem', 'spec': fs_spec, 'storageClass': {'enabled': True, 'isDefault': True, 'name': 'ceph-filesystem', 'pool': 'ceph-filesystem-data0', 'reclaimPolicy': 'Delete', 'allowVolumeExpansion': True}}],
+        'toolbox': {'enabled': True},
+        'monitoring': {'enabled': True}
     }
 
-    # Conditional Network Configuration
     if storage_cidr:
         print(f"Configuring Host Network with CIDR: {storage_cidr}")
-        values["cephClusterSpec"]["network"] = {
-            "provider": "host",
-            "addressRanges": {
-                "cluster": [storage_cidr]
-                # public defaults to empty (host network)
-            }
+        values['cephClusterSpec']['network'] = {
+            'provider': 'host',
+            'addressRanges': {'cluster': [storage_cidr]}
         }
     else:
         print("Using default CNI networking (No STORAGE_CIDR set).")
