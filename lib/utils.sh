@@ -48,6 +48,7 @@ run_safe() {
 }
 
 check_dependencies() {
+    export CLOUDSDK_CORE_DISABLE_PROMPTS=1
     log "Checking dependencies..."
     # strict dependencies (System Tools Only)
     for cmd in gcloud gsutil curl envsubst python3 jq kubectl; do

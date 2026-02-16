@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 # --- Phase 5: Register/Bootstrap ---
@@ -74,7 +75,7 @@ talosctl --talosconfig "\$TALOSCONFIG" config endpoint ${CP_ENDPOINT_IP}
 talosctl --talosconfig "\$TALOSCONFIG" config node ${CP_ENDPOINT_IP}
 echo "Bootstrapping Cluster..."
 # Bootstrap can race with node readiness, retry it
-for i in {1..20}; do
+for i in {1..60}; do
     OUTPUT=\$(talosctl --talosconfig "\$TALOSCONFIG" bootstrap 2>&1)
     EXIT_CODE=\$?
 
@@ -86,13 +87,13 @@ for i in {1..20}; do
         break
     fi
 
-    echo "Talos API not yet ready for bootstrap (node booting/services starting)... (Attempt \$i/20, max 1m40s)"
+    echo "Talos API not yet ready for bootstrap (node booting/services starting)... (Attempt \$i/60, max 5m)"
     echo "Last Error: \$OUTPUT"
     sleep 5
 done
 
 echo "Waiting for kubeconfig generation (certificate signing)..."
-for i in {1..30}; do
+for i in {1..60}; do
     # Save to ~/.kube/config directly (Updated/Verified)
     if talosctl --talosconfig "\$TALOSCONFIG" kubeconfig ~/.kube/config; then
         echo "Kubeconfig retrieved successfully!"
@@ -100,7 +101,7 @@ for i in {1..30}; do
         chmod 600 ~/.kube/config
         exit 0
     fi
-    echo "Waiting for API Server to provide Kubeconfig... (Attempt \$i/30, max 5m)"
+    echo "Waiting for API Server to provide Kubeconfig... (Attempt \$i/60, max 10m)"
     sleep 10
 done
 echo "Failed to retrieve kubeconfig."

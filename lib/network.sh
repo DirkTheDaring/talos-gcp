@@ -116,7 +116,11 @@ provision_networking() {
     # 5. Firewall Rules
     # Allow Internal Traffic
     if gcloud compute firewall-rules describe "${FW_INTERNAL}" --project="${PROJECT_ID}" &>/dev/null; then
-        log "Firewall Rule '${FW_INTERNAL}' exists."
+        log "Firewall Rule '${FW_INTERNAL}' exists. Updating..."
+        run_safe gcloud compute firewall-rules update "${FW_INTERNAL}" \
+            --allow=tcp,udp,icmp \
+            --source-ranges="${SUBNET_RANGE},${POD_CIDR},${SERVICE_CIDR}" \
+            --project="${PROJECT_ID}"
     else
         log "Creating Internal Firewall Rule..."
         run_safe gcloud compute firewall-rules create "${FW_INTERNAL}" \
@@ -128,7 +132,12 @@ provision_networking() {
 
     # Allow IAP/SSH for Bastion
     if gcloud compute firewall-rules describe "${FW_BASTION}" --project="${PROJECT_ID}" &>/dev/null; then
-        log "Firewall Rule '${FW_BASTION}' exists."
+        log "Firewall Rule '${FW_BASTION}' exists. Updating..."
+        run_safe gcloud compute firewall-rules update "${FW_BASTION}" \
+            --allow=tcp:22 \
+            --source-ranges=35.235.240.0/20 \
+            --target-tags=bastion \
+            --project="${PROJECT_ID}"
     else
         log "Creating Bastion SSH Firewall Rule..."
         run_safe gcloud compute firewall-rules create "${FW_BASTION}" \
@@ -145,6 +154,7 @@ provision_networking() {
         log "Firewall Rule '${FW_BASTION_INTERNAL}' exists. Ensuring correct ports..."
         run_safe gcloud compute firewall-rules update "${FW_BASTION_INTERNAL}" \
             --allow=tcp:6443,tcp:50000,tcp:50001 \
+            --source-tags=bastion \
             --project="${PROJECT_ID}"
     else
         log "Creating Bastion->Cluster Firewall Rule..."
@@ -156,7 +166,6 @@ provision_networking() {
     fi
 
 
-    # Allow Health Checks
     # Allow Health Checks
     # Sanitize input (remove spaces)
     local ranges_sanitized="${HC_SOURCE_RANGES// /}"
@@ -256,7 +265,11 @@ provision_networking() {
 
         # Storage Firewall (Allow Internal)
         if gcloud compute firewall-rules describe "${FW_STORAGE_INTERNAL}" --project="${PROJECT_ID}" &>/dev/null; then
-            log "Storage Firewall '${FW_STORAGE_INTERNAL}' exists."
+            log "Storage Firewall '${FW_STORAGE_INTERNAL}' exists. Updating..."
+            run_safe gcloud compute firewall-rules update "${FW_STORAGE_INTERNAL}" \
+                --allow=tcp,udp,icmp \
+                --source-ranges="${STORAGE_CIDR}" \
+                --project="${PROJECT_ID}"
         else
             log "Creating Storage Firewall Rule..."
             run_safe gcloud compute firewall-rules create "${FW_STORAGE_INTERNAL}" \
