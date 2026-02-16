@@ -76,7 +76,7 @@ def patch_file(filename, is_controlplane):
             if 'certSANs' not in data['machine']: data['machine']['certSANs'] = []
             ilb_ip = "${CP_ILB_IP}"
             if ilb_ip:
-                 print(f"Adding ILB IP {ilb_ip} to certSANs...")
+                 print(f"DEBUG: Adding ILB IP {ilb_ip} to certSANs...")
                  if ilb_ip not in data['machine']['certSANs']:
                      data['machine']['certSANs'].append(ilb_ip)
             else:

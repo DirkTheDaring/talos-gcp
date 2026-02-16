@@ -8,19 +8,31 @@
 bootstrap_etcd() {
     log "Phase 7: Bootstrapping Etcd..."
     
+    # Ensure variables are set
+    set_names
+    
     # 1. Get Control Plane VIP (ILB)
-    # We prefer the VIP because it's in the certSANs (controlplane.yaml), whereas 
-    # the specific Node IP (DHCP) might not be in the serving cert yet, causing TLS errors.
+    # We prefer the VIP because it's in the certSANs (controlplane.yaml).
     local CP_ENDPOINT_IP=""
+    
+    log "DEBUG: Resolving Bootstrap Endpoint..."
+    log "DEBUG: ILB_CP_IP_NAME=${ILB_CP_IP_NAME:-}"
     
     # Try fetching ILB IP first
     if [ -n "${ILB_CP_IP_NAME:-}" ]; then
          CP_ENDPOINT_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+         log "DEBUG: Resolved CP_ENDPOINT_IP (VIP)=${CP_ENDPOINT_IP}"
+         
+         if [ -z "$CP_ENDPOINT_IP" ]; then
+             error "ILB IP Name '${ILB_CP_IP_NAME}' is set, but Cloud Address could not be found!"
+             error "Possible causes: Resource creation failed, permission check, or wrong region."
+             return 1
+         fi
     fi
     
-    # Fallback to Node IP if ILB not found (e.g., single node / public mode?)
+    # Fallback only if ILB Name was NOT set (e.g. legacy mode)
     if [ -z "$CP_ENDPOINT_IP" ]; then
-        log "Warning: Control Plane ILB IP not found. Falling back to Instance IP (Might cause TLS SAN errors)..."
+        log "Warning: No ILB Name configured. Falling back to Instance IP (Might cause TLS SAN errors)..."
         local cp_0_name="${CLUSTER_NAME}-cp-0"
         for i in {1..10}; do
             CP_ENDPOINT_IP=$(gcloud compute instances describe "${cp_0_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].networkIP)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
