@@ -12,41 +12,33 @@ bootstrap_etcd() {
     # Ensure variables are set
     set_names
     
-    # 1. Get Control Plane VIP (ILB)
-    # We prefer the VIP because it's in the certSANs (controlplane.yaml).
+    # 1. Get Control Plane IP (Bootstrap Node)
+    # CRITICAL: We MUST use the Instance IP directly (e.g. cp-0) for bootstrap.
+    # Why?
+    #   GCP Internal LBs (VIP) forward packets to the backend instance with Dst=VIP.
+    #   The backend instance (Talos) will DROP these packets unless the VIP is configured on an interface (e.g. lo).
+    #   But we configure the VIP on 'lo' via a DaemonSet in Phase 8 (provision_k8s_networking).
+    #   Phase 7 (Bootstrap) happens BEFORE Phase 8.
+    #   Therefore, we cannot access the API via VIP yet. We must bypass the LB.
+    
     local CP_ENDPOINT_IP=""
+    local cp_0_name="${CLUSTER_NAME}-cp-0"
     
-    log "DEBUG: Resolving Bootstrap Endpoint..."
-    log "DEBUG: ILB_CP_IP_NAME=${ILB_CP_IP_NAME:-}"
+    log "Resolving Bootstrap Endpoint (Instance: ${cp_0_name})..."
     
-    # Try fetching ILB IP first
-    if [ -n "${ILB_CP_IP_NAME:-}" ]; then
-         CP_ENDPOINT_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
-         log "DEBUG: Resolved CP_ENDPOINT_IP (VIP)=${CP_ENDPOINT_IP}"
-         
-         if [ -z "$CP_ENDPOINT_IP" ]; then
-             error "ILB IP Name '${ILB_CP_IP_NAME}' is set, but Cloud Address could not be found!"
-             error "Possible causes: Resource creation failed, permission check, or wrong region."
-             return 1
-         fi
-    fi
-    
-    # Fallback only if ILB Name was NOT set (e.g. legacy mode)
-    if [ -z "$CP_ENDPOINT_IP" ]; then
-        log "Warning: No ILB Name configured. Falling back to Instance IP (Might cause TLS SAN errors)..."
-        local cp_0_name="${CLUSTER_NAME}-cp-0"
-        for i in {1..10}; do
-            CP_ENDPOINT_IP=$(gcloud compute instances describe "${cp_0_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].networkIP)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
-            if [ -n "$CP_ENDPOINT_IP" ]; then
-                break
-            fi
-            log "Waiting for Control Plane IP... (Attempt $i/10)"
-            sleep 3
-        done
-    fi
+    # Try fetching Instance IP (Retry logic in case it's not ready)
+    for i in {1..10}; do
+        CP_ENDPOINT_IP=$(gcloud compute instances describe "${cp_0_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].networkIP)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+        if [ -n "$CP_ENDPOINT_IP" ]; then
+            log "DEBUG: Resolved CP_ENDPOINT_IP (Node)=${CP_ENDPOINT_IP}"
+            break
+        fi
+        log "Waiting for Control Plane Node IP... (Attempt $i/10)"
+        sleep 3
+    done
     
     if [ -z "$CP_ENDPOINT_IP" ]; then
-        error "Could not determine Control Plane Endpoint IP (VIP or Node)."
+        error "Could not determine Control Plane Node IP."
         exit 1
     fi
     
@@ -189,6 +181,11 @@ finalize_bastion_config() {
     # We revert talosconfig endpoint to VIP (ILB) before syncing, so admins use the stable address
     # (Bootstrap used Node IP, but we want VIP for long-term use)
     local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
+    
+    if [ -z "$CP_ILB_IP" ]; then
+        error "Could not resolve Control Plane VIP (ILB IP). Cannot finalize Bastion config."
+        exit 1
+    fi
     
     log "Finalizing /etc/skel configuration..."
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
