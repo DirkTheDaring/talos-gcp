@@ -8,22 +8,36 @@
 bootstrap_etcd() {
     log "Phase 7: Bootstrapping Etcd..."
     
-    # Retry fetching IP to handle API transients
-    local CONTROL_PLANE_0_IP=""
-    local cp_0_name="${CLUSTER_NAME}-cp-0"
-    for i in {1..10}; do
-        CONTROL_PLANE_0_IP=$(gcloud compute instances describe "${cp_0_name}" --zone "${ZONE}" --format json 2>/dev/null | jq -r '.networkInterfaces[0].networkIP' || echo "")
-        if [ -n "$CONTROL_PLANE_0_IP" ] && [ "$CONTROL_PLANE_0_IP" != "null" ]; then
-            break
-        fi
-        log "Waiting for Control Plane IP to be assigned... (Attempt $i/10, usually <30s)"
-        sleep 3
-    done
+    # 1. Get Control Plane VIP (ILB)
+    # We prefer the VIP because it's in the certSANs (controlplane.yaml), whereas 
+    # the specific Node IP (DHCP) might not be in the serving cert yet, causing TLS errors.
+    local CP_ENDPOINT_IP=""
     
-    if [ -z "$CONTROL_PLANE_0_IP" ]; then
-        error "Could not determine Control Plane IP."
+    # Try fetching ILB IP first
+    if [ -n "${ILB_CP_IP_NAME:-}" ]; then
+         CP_ENDPOINT_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+    fi
+    
+    # Fallback to Node IP if ILB not found (e.g., single node / public mode?)
+    if [ -z "$CP_ENDPOINT_IP" ]; then
+        log "Warning: Control Plane ILB IP not found. Falling back to Instance IP (Might cause TLS SAN errors)..."
+        local cp_0_name="${CLUSTER_NAME}-cp-0"
+        for i in {1..10}; do
+            CP_ENDPOINT_IP=$(gcloud compute instances describe "${cp_0_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].networkIP)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+            if [ -n "$CP_ENDPOINT_IP" ]; then
+                break
+            fi
+            log "Waiting for Control Plane IP... (Attempt $i/10)"
+            sleep 3
+        done
+    fi
+    
+    if [ -z "$CP_ENDPOINT_IP" ]; then
+        error "Could not determine Control Plane Endpoint IP (VIP or Node)."
         exit 1
     fi
+    
+    log "Bootstrapping against Endpoint: ${CP_ENDPOINT_IP}"
     
     log "Preparing bootstrap script..."
     # Use structured paths to keep HOME clean ($HOME/.talos/config)
@@ -44,8 +58,8 @@ if [ ! -f "\$TALOSCONFIG" ]; then
     fi
 fi
 
-talosctl --talosconfig "\$TALOSCONFIG" config endpoint ${CONTROL_PLANE_0_IP}
-talosctl --talosconfig "\$TALOSCONFIG" config node ${CONTROL_PLANE_0_IP}
+talosctl --talosconfig "\$TALOSCONFIG" config endpoint ${CP_ENDPOINT_IP}
+talosctl --talosconfig "\$TALOSCONFIG" config node ${CP_ENDPOINT_IP}
 echo "Bootstrapping Cluster..."
 # Bootstrap can race with node readiness, retry it
 for i in {1..20}; do
