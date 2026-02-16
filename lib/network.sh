@@ -142,7 +142,10 @@ provision_networking() {
     # Allow Bastion -> Cluster (API & Talos)
     # Explicit rule to ensure Bastion can talk to CP/Workers even if Internal rule is flaky
     if gcloud compute firewall-rules describe "${FW_BASTION_INTERNAL}" --project="${PROJECT_ID}" &>/dev/null; then
-        log "Firewall Rule '${FW_BASTION_INTERNAL}' exists."
+        log "Firewall Rule '${FW_BASTION_INTERNAL}' exists. Ensuring correct ports..."
+        run_safe gcloud compute firewall-rules update "${FW_BASTION_INTERNAL}" \
+            --allow=tcp:6443,tcp:50000,tcp:50001 \
+            --project="${PROJECT_ID}"
     else
         log "Creating Bastion->Cluster Firewall Rule..."
         run_safe gcloud compute firewall-rules create "${FW_BASTION_INTERNAL}" \
@@ -154,14 +157,21 @@ provision_networking() {
 
 
     # Allow Health Checks
+    # Allow Health Checks
+    # Sanitize input (remove spaces)
+    local ranges_sanitized="${HC_SOURCE_RANGES// /}"
     if gcloud compute firewall-rules describe "${FW_HEALTH}" --project="${PROJECT_ID}" &>/dev/null; then
-        log "Firewall Rule '${FW_HEALTH}' exists."
+        log "Firewall Rule '${FW_HEALTH}' exists. Ensuring correct ports..."
+        run_safe gcloud compute firewall-rules update "${FW_HEALTH}" \
+            --allow=tcp:6443,tcp:50000,tcp:50001 \
+            --source-ranges="${ranges_sanitized}" \
+            --project="${PROJECT_ID}"
     else
         log "Creating Health Check Firewall Rule..."
         run_safe gcloud compute firewall-rules create "${FW_HEALTH}" \
             --network="${VPC_NAME}" \
             --allow=tcp:6443,tcp:50000,tcp:50001 \
-            --source-ranges=35.191.0.0/16,130.211.0.0/22 \
+            --source-ranges="${ranges_sanitized}" \
             --project="${PROJECT_ID}"
     fi
 

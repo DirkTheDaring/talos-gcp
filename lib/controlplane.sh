@@ -76,11 +76,11 @@ def patch_file(filename, is_controlplane):
             if 'certSANs' not in data['machine']: data['machine']['certSANs'] = []
             ilb_ip = "${CP_ILB_IP}"
             if ilb_ip:
-                 print(f"DEBUG: Adding ILB IP {ilb_ip} to certSANs...")
-                 if ilb_ip not in data['machine']['certSANs']:
-                     data['machine']['certSANs'].append(ilb_ip)
+                print(f"DEBUG: Adding ILB IP {ilb_ip} to certSANs...")
+                if ilb_ip not in data['machine']['certSANs']:
+                    data['machine']['certSANs'].append(ilb_ip)
             else:
-                 print("Warning: CP_ILB_IP is empty/not passed to patch script!")
+                print("Warning: CP_ILB_IP is empty/not passed to patch script!")
             
         # 4. Cilium Configuration (Conditional)
         install_cilium = "${INSTALL_CILIUM}" == "true"

@@ -52,6 +52,9 @@ SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/20}"   # Default: Services
 # Storage CIDR (Multi-NIC) - Default Empty (Opt-in)
 STORAGE_CIDR="${STORAGE_CIDR:-}"
 
+# Health Check Source Ranges (Google Cloud Defaults)
+HC_SOURCE_RANGES="${HC_SOURCE_RANGES:-35.191.0.0/16,130.211.0.0/22}"
+
 # Compute
 CP_MACHINE_TYPE="${CP_MACHINE_TYPE:-e2-standard-2}"
 CP_USE_STORAGE_NETWORK="${CP_USE_STORAGE_NETWORK:-false}"
