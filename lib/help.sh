@@ -50,14 +50,18 @@ ${YELLOW}Commands:${NC}
   ${BLUE}--- Debugging & Maintenance ---${NC}
   ${GREEN}diagnose${NC}                Run a suite of diagnostic checks on the cluster
   ${GREEN}verify-connectivity${NC}     Verify internal cluster connectivity (PingMESH)
-  ${GREEN}verify-storage${NC}          Verify CSI Driver and Persistent Volume functionality
   ${GREEN}recreate-bastion${NC}        Destroy and recreate the Bastion host
   ${GREEN}update-labels${NC}           Update labels on GCP instances
   ${GREEN}list-instances${NC}          List all GCP instances associated with the cluster
-  ${GREEN}orphans${NC}                 List orphan resources (disks/IPs) not attached to the cluster
-  ${GREEN}orphans clean${NC}           Cleanup orphan resources
   ${GREEN}update-cilium${NC}           Update Cilium CNI configuration
   ${GREEN}update-schedule${NC}         Update the instance schedule (shutdown/startup times)
+  ${GREEN}orphans${NC}                 List orphan resources (disks/IPs) not attached to the cluster
+  ${GREEN}orphans clean${NC}           Cleanup orphan resources
+
+  ${BLUE}--- Storage ---${NC}
+  ${GREEN}verify-storage${NC}          Verify CSI Driver and Persistent Volume functionality
+  ${GREEN}update-rook-ceph${NC}        Update Rook Ceph Cluster configuration
+  ${GREEN}install-ceph-client${NC}     Install/Config Ceph Client on Bastion
 
 ${YELLOW}Examples:${NC}
   ./talos-gcp create

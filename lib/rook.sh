@@ -27,34 +27,57 @@ verify_rook_nodes() {
             continue
         fi
         
-        log "  > Checking pool '$pool' (Expected: $expected_count, Label: $role_label)..."
-        
-        # Check active nodes
-        local actual_count=0
         if [[ "$expected_count" -gt 0 ]]; then
-             # Use kubectl to count nodes with the specific label
-             # We run this exclusively on the bastion to ensure connectivity (Private Clusters)
-             local cmd="kubectl get nodes -l $role_label --no-headers 2>/dev/null | wc -l"
-             
-             local remote_output
-             if ! remote_output=$(run_on_bastion "$cmd"); then
-                 error "Failed to check node count on bastion."
-                 exit 1
-             fi
-             
-             actual_count="$remote_output"
-             # Trim whitespace
-             actual_count="${actual_count//[[:space:]]/}"
-        fi
-        
-        if [[ "$actual_count" -lt "$expected_count" ]]; then
-            error "Node count mismatch for pool '$pool'. Expected: $expected_count, Found: $actual_count"
-            error "Please provision the missing infrastructure before deploying Rook."
-            exit 1
-        else
-            log "    OK: Found $actual_count/$expected_count nodes."
+            log "  > Checking pool '$pool' (Expected: $expected_count, Label: $role_label)..."
+            
+            local actual_count=0
+            local retries=30
+            local wait_time=10
+            
+            for ((i=1; i<=retries; i++)); do
+                 local cmd="kubectl get nodes -l $role_label --no-headers 2>/dev/null | wc -l"
+                 local remote_output
+                 
+                 if remote_output=$(run_on_bastion "$cmd"); then
+                     actual_count="${remote_output//[[:space:]]/}"
+                     if [[ "$actual_count" -ge "$expected_count" ]]; then
+                         log "    OK: Found $actual_count/$expected_count nodes."
+                         break
+                     fi
+                 fi
+                 
+                 if [[ $i -lt $retries ]]; then
+                     log "    Attempt $i/$retries: Found $actual_count/$expected_count nodes. Waiting ${wait_time}s..."
+                     sleep $wait_time
+                 fi
+            done
+            
+            if [[ "$actual_count" -lt "$expected_count" ]]; then
+                error "Node count mismatch for pool '$pool'. Expected: $expected_count, Found: $actual_count after $((retries * wait_time))s."
+                error "Please provision the missing infrastructure before deploying Rook."
+                exit 1
+            fi
         fi
     done
+}
+
+wait_for_crd() {
+    local crd_name="$1"
+    local retries=30
+    local wait_time=10
+    
+    log "Waiting for CRD '$crd_name' to be established..."
+    for ((i=1; i<=retries; i++)); do
+        if run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get crd $crd_name" &>/dev/null; then
+            log "CRD '$crd_name' is ready."
+            return 0
+        fi
+        log "Attempt $i/$retries: CRD not yet ready. Waiting ${wait_time}s..."
+        sleep $wait_time
+    done
+    
+    error "Timed out waiting for CRD '$crd_name'."
+    return 1
 }
 
 deploy_rook() {
@@ -99,7 +122,6 @@ deploy_rook() {
             
         kubectl -n rook-ceph rollout status deployment/rook-ceph-operator --timeout=120s
         
-        # Pre-requisite for Monitoring: ServiceMonitor CRD
         if ! kubectl get crd servicemonitors.monitoring.coreos.com &>/dev/null; then
             echo 'Installing ServiceMonitor CRD...'
             kubectl apply --server-side -f https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/v0.71.2/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml
@@ -107,6 +129,9 @@ deploy_rook() {
             echo 'ServiceMonitor CRD already exists.'
         fi
     "
+
+    # Ensure Rook CephCluster CRD is available before proceeding
+    wait_for_crd "cephclusters.ceph.rook.io"
 
     deploy_rook_cluster
 }
@@ -353,6 +378,16 @@ install_ceph_client() {
             echo 'ceph-common is already installed.'
         fi
 
+        # Wait for Secret
+        echo 'Waiting for rook-ceph-admin-keyring secret...'
+        for i in {1..30}; do
+            if kubectl -n rook-ceph get secret rook-ceph-admin-keyring &>/dev/null; then
+                break
+            fi
+            echo "Attempt \$i/30: Secret not found. Waiting 10s..."
+            sleep 10
+        done
+
         # 2. Extract Credentials
         echo 'Extracting credentials from cluster...'
         KEYRING_BASE64=\$(kubectl -n rook-ceph get secret rook-ceph-admin-keyring -o jsonpath='{.data.keyring}')
@@ -366,11 +401,34 @@ install_ceph_client() {
         echo \"\$KEYRING_BASE64\" | base64 -d | sudo tee /etc/ceph/ceph.client.admin.keyring >/dev/null
         sudo chmod 600 /etc/ceph/ceph.client.admin.keyring
 
-        FSID=\$(kubectl -n rook-ceph get cephcluster rook-ceph -o jsonpath='{.status.ceph.fsid}')
+        # Wait for CephCluster
+        echo 'Waiting for CephCluster FSID...'
+        for i in {1..30}; do
+            FSID=\$(kubectl -n rook-ceph get cephcluster rook-ceph -o jsonpath='{.status.ceph.fsid}' 2>/dev/null)
+            if [ -n \"\$FSID\" ]; then
+                break
+            fi
+            echo "Attempt \$i/30: FSID not ready. Waiting 10s..."
+            sleep 10
+        done
+
+        if [ -z \"\$FSID\" ]; then
+             echo 'Error: Could not retrieve FSID.'
+             exit 1
+        fi
         
         # Get endpoints from ConfigMap (val=IP:port,...) and strip names
-        MON_DATA=\$(kubectl -n rook-ceph get cm rook-ceph-mon-endpoints -o jsonpath='{.data.data}')
-        MON_HOSTS=\$(echo "\$MON_DATA" | sed 's/[a-z]=//g')
+        echo 'Waiting for mon-endpoints ConfigMap...'
+        for i in {1..30}; do
+            MON_DATA=\$(kubectl -n rook-ceph get cm rook-ceph-mon-endpoints -o jsonpath='{.data.data}' 2>/dev/null)
+            if [ -n \"\$MON_DATA\" ]; then
+                break
+            fi
+            echo "Attempt \$i/30: ConfigMap not ready. Waiting 10s..."
+            sleep 10
+        done
+
+        MON_HOSTS=\$(echo \"\$MON_DATA\" | sed 's/[a-z]=//g')
         
         echo \"[global]\" | sudo tee /etc/ceph/ceph.conf >/dev/null
         echo \"fsid = \$FSID\" | sudo tee -a /etc/ceph/ceph.conf >/dev/null
