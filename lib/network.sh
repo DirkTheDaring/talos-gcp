@@ -547,7 +547,7 @@ fix_aliases() {
     # 2. Fetch GCP Data (Current State) - Bulk Fetch
     log "Fetching current GCP Alias IPs..."
     local gcp_output
-    if ! gcp_output=$(gcloud compute instances list --filter="name:(${CLUSTER_NAME}-*) AND zone:(${ZONE})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
+    if ! gcp_output=$(gcloud compute instances list --filter="name:(${CLUSTER_NAME}-*) AND zone:(${ZONE}) AND networkInterfaces.network:(${VPC_NAME})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
         warn "Failed to fetch instance data from GCP. Skipping."
         return 1
     fi
@@ -627,7 +627,7 @@ reset_aliases() {
     
     # Bulk Fetch
     local gcp_output
-    if ! gcp_output=$(gcloud compute instances list --filter="name:(${CLUSTER_NAME}-*) AND zone:(${ZONE})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
+    if ! gcp_output=$(gcloud compute instances list --filter="name:(${CLUSTER_NAME}-*) AND zone:(${ZONE}) AND networkInterfaces.network:(${VPC_NAME})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
         warn "Failed to fetch instance data from GCP."
         return 1
     fi
@@ -659,9 +659,9 @@ resolve_collisions() {
         return 0
     fi
     
-    # 1. Fetch Name and Alias for ALL nodes in zone (to catch cross-cluster or stale collisions)
+    # 1. Fetch Name and Alias for ALL nodes in zone + VPC (to catch cross-cluster or stale collisions)
     local gcp_output
-    if ! gcp_output=$(gcloud compute instances list --filter="zone:(${ZONE})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
+    if ! gcp_output=$(gcloud compute instances list --filter="zone:(${ZONE}) AND networkInterfaces.network:(${VPC_NAME})" --format="value(name,networkInterfaces[0].aliasIpRanges[0].ipCidrRange)" --project="${PROJECT_ID}" 2>/dev/null); then
         warn "Failed to fetch instance data. Skipping collision check."
         return 0
     fi
