@@ -27,12 +27,13 @@ ROOK_MDS_CPU="${ROOK_MDS_CPU:-3}"           # Default: Production (Recommended)
 ROOK_MDS_MEMORY="${ROOK_MDS_MEMORY:-4Gi}"   # Default: Production (Recommended)
 ROOK_OSD_CPU="${ROOK_OSD_CPU:-1}"           # Default: 1 vCPU per OSD
 ROOK_OSD_MEMORY="${ROOK_OSD_MEMORY:-2Gi}"   # Default: 2Gi per OSD
+# Name of the external Rook Ceph cluster to connect to (if any)
+ROOK_EXTERNAL_CLUSTER_NAME="${ROOK_EXTERNAL_CLUSTER_NAME:-}"
 
 # Mixed Role Versions (Default to global TALOS_VERSION)
 CP_TALOS_VERSION="${CP_TALOS_VERSION:-$TALOS_VERSION}"
 WORKER_TALOS_VERSION="${WORKER_TALOS_VERSION:-$TALOS_VERSION}"
 
-# Extensions (Comma-separated, e.g. "siderolabs/gvisor,siderolabs/nvidia-container-toolkit")
 # Extensions (Comma-separated, e.g. "siderolabs/gvisor,siderolabs/nvidia-container-toolkit")
 CP_EXTENSIONS="${CP_EXTENSIONS:-}"
 WORKER_EXTENSIONS="${WORKER_EXTENSIONS:-}"

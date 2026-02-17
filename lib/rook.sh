@@ -80,12 +80,7 @@ wait_for_crd() {
     return 1
 }
 
-deploy_rook() {
-    local FORCE_UPDATE="${1:-false}"
-    
-    # Pre-flight Verification
-    verify_rook_nodes
-
+install_rook_operator() {
     log "Deploying Rook Ceph Operator (Version: ${ROOK_CHART_VERSION}) via Helm..."
     
     # 0. Ensure Helm is installed on Bastion
@@ -132,6 +127,15 @@ deploy_rook() {
 
     # Ensure Rook CephCluster CRD is available before proceeding
     wait_for_crd "cephclusters.ceph.rook.io"
+}
+
+deploy_rook() {
+    local FORCE_UPDATE="${1:-false}"
+    
+    # Pre-flight Verification
+    verify_rook_nodes
+    
+    install_rook_operator || return 1
 
     deploy_rook_cluster
 }

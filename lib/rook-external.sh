@@ -9,27 +9,14 @@ deploy_rook_client() {
     # 1. Install Rook Operator (Required for CSI)
     # Ensure source rook.sh is loaded for install_rook_operator
     source "${SCRIPT_DIR}/lib/rook.sh"
-    install_rook_operator
-
-    # 2. Check for configured peer
-    local found_peer="false"
-    for peer in "${PEER_WITH[@]}"; do
-        if [[ "$peer" == "rook-ceph" ]]; then
-            found_peer="true"
-            break
-        fi
-    done
+    install_rook_operator || return 1
     
-    if [[ "$found_peer" == "false" ]]; then
-        warn "Warning: 'rook-ceph' is not in PEER_WITH list. Storage might be unreachable."
-    fi
-    
-    # 3. Import External Cluster and User Info
+    # 2. Import External Cluster and User Info
     import_external_cluster_info
 }
 
 import_external_cluster_info() {
-    log "Importing connection info from 'rook-ceph' cluster..."
+    log "Importing connection info from '${ROOK_EXTERNAL_CLUSTER_NAME}' cluster..."
     
     # Prerequisite: Must have access to 'rook-ceph' kubeconfig or ability to fetch secrets.
     # We can use the 'get_credentials' logic or assume we can context switch if on the same machine/bastion.
@@ -57,7 +44,23 @@ import_external_cluster_info() {
     
     # Since we might not have direct network access to the rook-ceph cluster (Private IP),
     # we use the rook-ceph-bastion to fetch the data.
-    local SOURCE_BASTION="rook-ceph-bastion"
+    if [ -z "${ROOK_EXTERNAL_CLUSTER_NAME}" ]; then
+        error "ROOK_EXTERNAL_CLUSTER_NAME is not set."
+        return 1
+    fi
+    local SOURCE_BASTION="${ROOK_EXTERNAL_CLUSTER_NAME}-bastion"
+    
+    # Detect Zone of Source Bastion
+    log "Locating external bastion '${SOURCE_BASTION}'..."
+    local SOURCE_ZONE
+    SOURCE_ZONE=$(gcloud compute instances list --filter="name=${SOURCE_BASTION}" --format="value(zone)" --project="${PROJECT_ID}" --limit=1)
+    
+    if [ -z "$SOURCE_ZONE" ]; then
+        error "Could not find '${SOURCE_BASTION}' in project '${PROJECT_ID}'. Is the external cluster deployed?"
+        return 1
+    fi
+    
+    log "Found '${SOURCE_BASTION}' in zone '${SOURCE_ZONE}'."
     
     # Remove local file check as we use Bastion
     # if [[ ! -f "$ROOK_KUBECONFIG" ]]; then ... fi
@@ -65,10 +68,10 @@ import_external_cluster_info() {
     log "Fetching secrets from ${SOURCE_BASTION}..."
     echo "DEBUG: SOURCE_BASTION='${SOURCE_BASTION}' ZONE='${ZONE}' PROJECT_ID='${PROJECT_ID}'"
     
-    local MON_ENDPOINTS=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get cm rook-ceph-mon-endpoints -o jsonpath='{.data.data}'")
-    local MON_SECRET=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get secret rook-ceph-mon -o jsonpath='{.data.mon-secret}'")
-    local ADMIN_KEYRING=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get secret rook-ceph-admin-keyring -o jsonpath='{.data.keyring}'")
-    local FSID=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get cephcluster rook-ceph -o jsonpath='{.status.ceph.fsid}' | base64 -w0")
+    local MON_ENDPOINTS=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${SOURCE_ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get cm rook-ceph-mon-endpoints -o jsonpath='{.data.data}'")
+    local MON_SECRET=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${SOURCE_ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get secret rook-ceph-mon -o jsonpath='{.data.mon-secret}'")
+    local ADMIN_KEYRING=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${SOURCE_ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get secret rook-ceph-admin-keyring -o jsonpath='{.data.keyring}'")
+    local FSID=$(gcloud compute ssh "${SOURCE_BASTION}" --zone "${SOURCE_ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n rook-ceph get cephcluster rook-ceph -o jsonpath='{.status.ceph.fsid}' | base64 -w0")
 
     # Clean up output
     MON_ENDPOINTS=$(echo "$MON_ENDPOINTS" | tr -d '\r')

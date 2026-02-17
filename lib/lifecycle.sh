@@ -6,6 +6,12 @@ apply() {
     set_names
     check_dependencies || return 1
     
+    # Validation
+    if [ "${ROOK_ENABLE}" == "true" ] && [ -n "${ROOK_EXTERNAL_CLUSTER_NAME}" ]; then
+        error "Invalid Configuration: Cluster cannot be both Rook Server (ROOK_ENABLE=true) and Rook Client (ROOK_EXTERNAL_CLUSTER_NAME set)."
+        return 1
+    fi
+    
     log "Updating Cluster Configuration..."
     log "Node Pools: ${NODE_POOLS[*]}"
     
@@ -33,7 +39,11 @@ apply() {
         deploy_rook || return 1
     fi
 
-    if [[ " ${PEER_WITH[@]} " =~ " rook-ceph " ]]; then
+    if [ -n "${ROOK_EXTERNAL_CLUSTER_NAME}" ]; then
+        # Ensure we are peered (optional warning)
+        if [[ ! " ${PEER_WITH[@]} " =~ " ${ROOK_EXTERNAL_CLUSTER_NAME} " ]]; then
+            warn "ROOK_EXTERNAL_CLUSTER_NAME '${ROOK_EXTERNAL_CLUSTER_NAME}' is set, but it is not in PEER_WITH. Network connectivity might fail."
+        fi
         source "${SCRIPT_DIR}/lib/rook-external.sh"
         deploy_rook_client || return 1
     fi
@@ -147,6 +157,12 @@ provision_peering() {
 deploy_all() {
     set_names
     check_dependencies || return 1
+
+    # Validation
+    if [ "${ROOK_ENABLE}" == "true" ] && [ -n "${ROOK_EXTERNAL_CLUSTER_NAME}" ]; then
+        error "Invalid Configuration: Cluster cannot be both Rook Server (ROOK_ENABLE=true) and Rook Client (ROOK_EXTERNAL_CLUSTER_NAME set)."
+        return 1
+    fi
     
     # 1. Resources & Checks
     provision_resources || return 1
@@ -201,7 +217,11 @@ deploy_all() {
     fi
 
     # 2. Rook Client Cluster
-    if [[ " ${PEER_WITH[@]} " =~ " rook-ceph " ]]; then
+    if [ -n "${ROOK_EXTERNAL_CLUSTER_NAME}" ]; then
+        # Ensure we are peered (optional warning)
+        if [[ ! " ${PEER_WITH[@]} " =~ " ${ROOK_EXTERNAL_CLUSTER_NAME} " ]]; then
+            warn "ROOK_EXTERNAL_CLUSTER_NAME '${ROOK_EXTERNAL_CLUSTER_NAME}' is set, but it is not in PEER_WITH. Network connectivity might fail."
+        fi
         source "${SCRIPT_DIR}/lib/rook-external.sh"
         deploy_rook_client || return 1
     fi
