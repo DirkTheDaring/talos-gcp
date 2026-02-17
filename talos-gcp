@@ -3,7 +3,7 @@
 # Talos GCP Deployment Script
 # Based on: https://docs.siderolabs.com/talos/v1.12/platform-specific-installations/cloud-platforms/gcp
 
-#set -x
+set -x
 
 set -euo pipefail
 

@@ -536,11 +536,47 @@ fix_aliases() {
         return 0
     fi
 
-    # 1. Fetch K8s Data (Source of Truth) via Bastion
+    # 3. Fetch K8s Data (Desired State) via Bastion
     log "Fetching Node Data via Bastion..."
+    
+    # Wait for API Server Readiness (max 2m)
+    # Wait for API Server Readiness (max 2m)
+    log "Waiting for API Server to be reachable via Bastion..."
+
+    # Check if default (VIP) is working, if not try Node IP fallback
+    local kv_server=""
+    if ! run_on_bastion "kubectl get --raw='/healthz' --request-timeout=5s" >/dev/null 2>&1; then
+        local cp0_ip
+        cp0_ip=$(gcloud compute instances describe "${CLUSTER_NAME}-cp-0" --zone "${ZONE}" --format="value(networkInterfaces[0].networkIP)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+        
+        if [ -n "$cp0_ip" ]; then
+             log "API Server (VIP) not ready. Checking Direct Node IP (${cp0_ip})..."
+             # Check if Node IP works (with insecure skip verify as cert holds VIP/SANs)
+             if run_on_bastion "kubectl --server=https://${cp0_ip}:6443 --insecure-skip-tls-verify=true get --raw='/healthz' --request-timeout=5s" >/dev/null 2>&1; then
+                 kv_server="--server=https://${cp0_ip}:6443 --insecure-skip-tls-verify=true"
+                 log "Using Direct Node IP for fix_aliases commands."
+             fi
+        fi
+    fi
+    
+    local ready=false
+    for i in {1..24}; do
+        if run_on_bastion "kubectl ${kv_server} get --raw='/healthz' --request-timeout=5s" &>/dev/null; then
+            ready=true
+            break
+        fi
+        sleep 5
+    done
+    
+    if [ "$ready" != "true" ]; then
+        warn "API Server not reachable after 2m. skipping alias fix for now."
+        return 1
+    fi
+
     local k8s_output
-    if ! k8s_output=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.spec.podCIDR}{\"\n\"}{end}'" 2>/dev/null); then
-        warn "Failed to fetch node data from Bastion. Skipping Alias IP sync."
+    # Use --request-timeout to fail fast if API is unresponsive
+    if ! k8s_output=$(run_on_bastion "kubectl ${kv_server} get nodes -o jsonpath='{range .items[*]}{.metadata.name} {.spec.podCIDR}{\"\\n\"}{end}' --request-timeout=10s"); then
+        warn "Failed to fetch Kubernetes node data via Bastion. Skipping."
         return 1
     fi
 
@@ -572,8 +608,15 @@ fix_aliases() {
     # We loop through GCP nodes that we found
     for node in "${!gcp_aliases[@]}"; do
         local current="${gcp_aliases[$node]}"
-        local target="${k8s_cidrs[$node]}" # Might be empty if not in K8s list or no PodCIDR
+        local target="${k8s_cidrs[$node]:-}" # Might be empty if not in K8s list or no PodCIDR
         
+        # SAFETY CHECK: If K8s target is empty, do NOT clear the alias.
+        # This prevents race conditions where KCM hasn't assigned CIDRs yet.
+        if [ -z "$target" ] && [ -n "$current" ]; then
+             warn "Node $node has GCP Alias '$current' but K8s reports no PodCIDR. Preserving GCP Alias."
+             continue
+        fi
+
         # If we have a current alias, but it doesn't match the target
         if [ -n "$current" ] && [ "$current" != "$target" ]; then
              log "Mismatch for $node: Current='$current', Target='${target:-none}'. Clearing..."
@@ -586,7 +629,7 @@ fix_aliases() {
     # --- Phase 2: Set Correct Aliases ---
     for node in "${!k8s_cidrs[@]}"; do
         local target="${k8s_cidrs[$node]}"
-        local current="${gcp_aliases[$node]}"
+        local current="${gcp_aliases[$node]:-}"
         
         # Only proceed if we have a valid target CIDR
         if [ -n "$target" ] && [ "$target" != "<none>" ]; then

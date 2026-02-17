@@ -174,8 +174,6 @@ deploy_all() {
     # 6. Bootstrap & Kubeconfig
     bootstrap_etcd || return 1
     
-    # 6b. Early Networking Fix (Ensure CP Aliases are correct before CNI)
-    fix_aliases
 
     # 7. K8s Networking (VIP Alias & CNI)
     provision_k8s_networking || return 1
