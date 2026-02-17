@@ -100,7 +100,7 @@ def patch_file(filename, is_controlplane):
         
         # Ensure feature gate (usually default, but explicit doesn't hurt)
         if 'extraArgs' not in data['machine']['kubelet']: data['machine']['kubelet']['extraArgs'] = {}
-        data['machine']['kubelet']['extraArgs']['graceful-node-shutdown'] = 'true'
+        # Removed graceful-node-shutdown extraArg for v1.12.3
 
         # 5. Enable KubePrism (Port 7445)
         if 'machine' not in data: data['machine'] = {}
@@ -208,7 +208,7 @@ def patch_file(filename, is_controlplane):
 patch_file("${OUTPUT_DIR}/controlplane.yaml", True)
 patch_file("${OUTPUT_DIR}/worker.yaml", False)
 PYEOF
-    run_safe python3 "${OUTPUT_DIR}/patch_config.py"
+    run_safe "${PYTHON_CMD}" "${OUTPUT_DIR}/patch_config.py"
 
     # 5. Validate Configs
     validate_talos_config "${OUTPUT_DIR}/controlplane.yaml" "machine"

@@ -10,7 +10,7 @@ validate_cidrs() {
     log "Validating CIDR ranges..."
     
     # Use Python for reliable CIDR overlap checking
-    python3 -c "
+    "${PYTHON_CMD}" -c "
 import ipaddress
 import sys
 

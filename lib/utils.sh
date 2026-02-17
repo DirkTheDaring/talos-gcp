@@ -50,8 +50,19 @@ run_safe() {
 check_dependencies() {
     export CLOUDSDK_CORE_DISABLE_PROMPTS=1
     log "Checking dependencies..."
+    # Determine Python Command
+    if command -v python3.14 &> /dev/null; then
+        export PYTHON_CMD="python3.14"
+    elif command -v python3 &> /dev/null; then
+        export PYTHON_CMD="python3"
+    else
+        error "System dependency 'python3' (or python3.14) is required but not installed."
+        exit 1
+    fi
+    log "Using Python: ${PYTHON_CMD}"
+
     # strict dependencies (System Tools Only)
-    for cmd in gcloud gsutil curl envsubst python3 jq kubectl; do
+    for cmd in gcloud gsutil curl envsubst jq kubectl; do
         if ! command -v "$cmd" &> /dev/null; then
              error "System dependency '$cmd' is required but not installed."
              exit 1
@@ -60,9 +71,9 @@ check_dependencies() {
     export KUBECTL="kubectl"
 
     # Check for PyYAML
-    if ! python3 -c "import yaml" &> /dev/null; then
-        error "Python module 'PyYAML' is required but not installed."
-        error "Please install it via: pip3 install PyYAML (or sudo apt install python3-yaml)"
+    if ! "${PYTHON_CMD}" -c "import yaml" &> /dev/null; then
+        error "Python module 'PyYAML' is required but not installed for ${PYTHON_CMD}."
+        error "Please install it via: ${PYTHON_CMD} -m pip install PyYAML"
         exit 1
     fi
     
@@ -408,8 +419,14 @@ ensure_admin_access() {
     log "Current User: $CURRENT_ACCOUNT"
     
     # Check if they have the role
-    # heuristic: verify if policy contains the binding
-    if gcloud projects get-iam-policy "${PROJECT_ID}" --flatten="bindings[].members" --format="table(bindings.role)" --filter="bindings.members:${CURRENT_ACCOUNT}" 2>/dev/null | grep -q "roles/compute.osAdminLogin"; then
+    log "DEBUG: Checking IAM policy for ${CURRENT_ACCOUNT}..."
+    local POLICY_OUTPUT
+    if ! POLICY_OUTPUT=$(gcloud projects get-iam-policy "${PROJECT_ID}" --flatten="bindings[].members" --format="table(bindings.role)" --filter="bindings.members:${CURRENT_ACCOUNT}" 2>/dev/null); then
+        warn "Failed to check IAM policy. Assuming no admin access."
+        POLICY_OUTPUT=""
+    fi
+
+    if echo "$POLICY_OUTPUT" | grep -q "roles/compute.osAdminLogin"; then
         log "✅ User has 'roles/compute.osAdminLogin'. Admin access confirmed."
     else
         warn "User missing 'roles/compute.osAdminLogin'."

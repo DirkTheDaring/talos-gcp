@@ -14,7 +14,15 @@ diagnose() {
     echo "--- whoami ---" >> _out/diagnose.txt
     whoami >> _out/diagnose.txt
     echo "--- python3 version ---" >> _out/diagnose.txt
-    python3 --version >> _out/diagnose.txt
+    if [ -n "${PYTHON_CMD:-}" ]; then
+        "${PYTHON_CMD}" --version >> _out/diagnose.txt 2>&1
+    elif command -v python3.14 &>/dev/null; then
+        python3.14 --version >> _out/diagnose.txt 2>&1
+    elif command -v python3 &>/dev/null; then
+        python3 --version >> _out/diagnose.txt 2>&1
+    else
+        echo "Python not found" >> _out/diagnose.txt
+    fi
     
     log "Environment diagnostics written to _out/diagnose.txt"
     

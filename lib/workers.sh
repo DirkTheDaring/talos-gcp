@@ -246,7 +246,7 @@ if __name__ == "__main__":
     )
 PYEOF
 
-    run_safe python3 "${gen_script}" \
+    run_safe "${PYTHON_CMD}" "${gen_script}" \
         "${base_file}" "${output_file}" "${labels}" "${taints}" \
         "${use_storage_net}" "${extensions}" "${kernel_args}" \
         "${tcp_ports}" "${udp_ports}"

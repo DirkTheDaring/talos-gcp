@@ -1,6 +1,7 @@
 #!/bin/bash
 
 install_maintenance() {
+    log "DEBUG: install_maintenance function invoked"
     log "Installing Maintenance Services on Bastion..."
     
     # Ensure Output Directory exists

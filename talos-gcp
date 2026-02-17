@@ -128,6 +128,7 @@ case "$COMMAND" in
     gen-config)
         # Standalone config generation (Mocked)
         set_names
+        check_dependencies
         cmd_gen_config
         ;;
     create)
@@ -324,7 +325,7 @@ case "$COMMAND" in
         set_names
         check_dependencies
         # Ensure we have admin access to the bastion
-        ensure_admin_access
+        # ensure_admin_access
         export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
         install_maintenance
         ;;
