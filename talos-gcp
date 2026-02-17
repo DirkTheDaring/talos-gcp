@@ -109,6 +109,7 @@ source "${SCRIPT_DIR}/lib/access.sh"
 source "${SCRIPT_DIR}/lib/binaries.sh"
 source "${SCRIPT_DIR}/lib/gen.sh"
 source "${SCRIPT_DIR}/lib/diagnose.sh"
+source "${SCRIPT_DIR}/lib/service.sh"
 
 source "${SCRIPT_DIR}/lib/help.sh"
 
