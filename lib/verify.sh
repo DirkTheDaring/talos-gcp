@@ -414,3 +414,38 @@ verify_gcp_alignment() {
         return 0
     fi
 }
+
+check_sa_key_limit() {
+    local sa_email="${1:-$SA_EMAIL}"
+    
+    log "Checking Service Account Key Limit for: ${sa_email}..."
+    log "DEBUG: check_sa_key_limit called with sa_email='${sa_email}'"
+    
+    # List USER_MANAGED keys
+    local keys
+    if ! keys=$(gcloud iam service-accounts keys list \
+        --iam-account="${sa_email}" \
+        --project="${PROJECT_ID}" \
+        --managed-by="user" \
+        --format="value(name)" 2>/dev/null); then
+        warn "Failed to check keys for ${sa_email}. Assuming safe."
+        return 0
+    fi
+    
+    local count
+    count=$(echo "$keys" | grep -v "^$" | wc -l)
+    
+    log "Current Key Count: ${count} / 10 (User Managed)"
+    
+    if [ "$count" -ge 10 ]; then
+        error "Service Account '${sa_email}' has reached the 10-key limit!"
+        error "Deployment WILL fail with FAILED_PRECONDITION."
+        error "Auto-pruning is enabled, but if you are using a shared SA, checks might prevent it."
+        return 1
+    elif [ "$count" -ge 8 ]; then
+        warn "Service Account '${sa_email}' is nearing the key limit ($count/10)."
+        warn "Old keys will be pruned automatically during deployment."
+    fi
+    
+    return 0
+}

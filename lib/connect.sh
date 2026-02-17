@@ -116,3 +116,60 @@ ssh_command() {
             -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
     fi
 }
+
+wait_for_api_reachability() {
+    local vip="$1"
+    local port="${2:-6443}"
+    local timeout_sec="${3:-300}" # 5 minutes default
+    
+    log "Waiting for API Server Reachability at https://${vip}:${port}..."
+    
+    # We run this ON THE BASTION because it has the correct routing context (VIP via ILB or alias).
+    # We use a small script embedded in the command.
+    
+    local cmd="
+        end=\$((SECONDS + ${timeout_sec}))
+        success_count=0
+        required_success=3
+        
+        echo 'Probing API Server at https://${vip}:${port}...'
+        
+        while [ \$SECONDS -lt \$end ]; do
+            # curl -k: Insecure (skip cert check)
+            # -s: Silent
+            # -o /dev/null: Discard output
+            # -w %{http_code}: Print status code
+            # --max-time 5: Timeout for probe
+            
+            code=\$(curl -k -s -o /dev/null -w '%{http_code}' --max-time 5 'https://${vip}:${port}/healthz' || echo '000')
+            
+            if [[ \"\$code\" == \"200\" ]] || [[ \"\$code\" == \"401\" ]] || [[ \"\$code\" == \"403\" ]]; then
+                # 200: OK
+                # 401/403: Unauthenticated/Forbidden (means API is UP and handling requests, even if we don't have auth token here)
+                success_count=\$((success_count + 1))
+                echo -n \".\"
+                if [ \$success_count -ge \$required_success ]; then
+                    echo ''
+                    echo 'API Server is Reachable and Stable.'
+                    exit 0
+                fi
+            else
+                success_count=0 # Reset on failure to ensure contiguous stability
+                echo -n \"x\"
+            fi
+            sleep 2
+        done
+        
+        echo ''
+        echo 'Timeout waiting for API Server.'
+        exit 1
+    "
+    
+    if run_on_bastion "$cmd"; then
+        log "✅ API Server is reachable."
+        return 0
+    else
+        error "API Server failed to become reachable within ${timeout_sec} seconds."
+        return 1
+    fi
+}

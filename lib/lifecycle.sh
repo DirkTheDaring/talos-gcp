@@ -21,11 +21,13 @@ apply() {
     # Ensure Images exist (create if missing, skip if present)
     ensure_role_images || return 1
     
-    # Reconcile Networking (Firewall Rules, etc.) - Allows Day 2 updates
-    provision_networking || return 1
+    # Ensure Service Account exists
+    ensure_service_account || return 1
+    check_sa_key_limit || return 1
     
-    # Ensure Configs exist (for worker scaling/updates)
-    generate_talos_configs || return 1
+    # Reconcile Control Plane (Networking, Configs, Nodes)
+    # This ensures networking is ready, configs are generated, and CP nodes are created/checked.
+    provision_controlplane_infra || return 1
     
     # Reconcile Workers (Create missing, Prune extra)
     provision_workers || return 1
@@ -120,6 +122,7 @@ provision_resources() {
     check_apis
     check_quotas
     ensure_service_account
+    check_sa_key_limit || return 1
     
     # Ensure Images for both roles
     ensure_role_images || return 1
@@ -187,9 +190,21 @@ deploy_all() {
     # 5. Configure Bastion (and push initial configs)
     configure_bastion || return 1
     
+
+
     # 6. Bootstrap & Kubeconfig
     bootstrap_etcd || return 1
     
+    # 6b. Wait for API Stability (Prevent Race Conditions)
+    # The VIP might need a moment to settle (ILB programming, local routes, etc.)
+    # We check the INTERNAL VIP since that's what addons use.
+    local CP_VIP
+    # We must fetch the IP because it might not be in the environment yet if we didn't just create it
+    if ! CP_VIP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}" 2>/dev/null); then
+         warn "Could not fetch CP VIP '${ILB_CP_IP_NAME}'. Skipping wait check (risky)."
+    else
+         wait_for_api_reachability "${CP_VIP}" "6443" || return 1
+    fi
 
     # 7. K8s Networking (VIP Alias & CNI)
     provision_k8s_networking || return 1

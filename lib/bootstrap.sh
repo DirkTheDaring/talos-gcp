@@ -129,8 +129,8 @@ provision_k8s_networking() {
         export KUBECONFIG="${OUTPUT_DIR}/kubeconfig"
     fi
 
-    # Deploy VIP Alias (Fixes Node IP issue by adding VIP to lo via DaemonSet)
-    deploy_vip_alias
+    # Deploy VIP Alias (NOW HANDLED via machine config lo interface - Day 0)
+    # deploy_vip_alias
 
     # Deploy CNI (Cilium)
     # CRITICAL: We deploy Cilium BEFORE CCM so that:

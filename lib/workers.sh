@@ -44,7 +44,8 @@ provision_pool() {
     local pool_kargs_var="POOL_${safe_pool_name^^}_KERNEL_ARGS"
     local kernel_args="${!pool_kargs_var:-$POOL_KERNEL_ARGS}"
 
-
+    local pool_nv_var="POOL_${safe_pool_name^^}_ALLOW_NESTED_VIRT"
+    local nested_virt="${!pool_nv_var:-false}"
 
     # Handle Custom Machine Types for Pools
     if [ "${machine_type}" == "custom" ]; then
@@ -64,6 +65,16 @@ provision_pool() {
              error "Pool '${pool_name}' set to 'custom' but VCPU or MEMORY_GB is missing."
              exit 1
         fi
+    fi
+
+    # Validation: Nested Virtualization requires non-E2 machine types
+    if [ "${nested_virt}" == "true" ]; then
+        if [[ "${machine_type}" == "e2-"* ]]; then
+            error "Pool '${pool_name}': Nested Virtualization is NOT supported on E2 machine types."
+            error "Please use N1, N2, N2D, or C2 machine types."
+            exit 1
+        fi
+        log "  > Pool '${pool_name}': Nested Virtualization ENABLED."
     fi
 
     log "  > Pool '${pool_name}': Count=${count}, Type=${machine_type}, StorageNet=${use_storage_net}"
@@ -279,6 +290,12 @@ PYEOF
              ext_hash=$(echo "${normalized_ext}|${normalized_kargs}" | md5sum | cut -c1-8)
              suffix="worker-${ext_hash}-${ARCH}"
         fi
+
+        # Append 'nv' suffix for Nested Virtualization
+        if [ "${nested_virt}" == "true" ]; then
+            suffix="${suffix}-nv"
+        fi
+
         image_to_use="talos-${safe_ver}-${suffix}"
     fi
 
@@ -412,6 +429,7 @@ create_node_instance() {
             --service-account="${WORKER_SERVICE_ACCOUNT}" --scopes cloud-platform \
             --tags "talos-worker,${CLUSTER_NAME}-worker,${instance_name}" \
             --labels="${gcp_labels}" \
+            --metadata=talos-image="${target_image}" \
             --metadata-from-file=user-data="${custom_config:-${OUTPUT_DIR}/worker.yaml}" \
             "${DISK_FLAGS[@]}"
             

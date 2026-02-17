@@ -28,6 +28,60 @@ update_cilium() {
     status
 }
 
+prune_sa_keys() {
+    local sa_email="$1"
+    if [ -z "$sa_email" ]; then return; fi
+    
+    log "Checking key limit for SA: ${sa_email}..."
+    
+    # List USER_MANAGED keys, sorted by validity (oldest first)
+    local keys
+    if ! keys=$(gcloud iam service-accounts keys list \
+        --iam-account="${sa_email}" \
+        --project="${PROJECT_ID}" \
+        --managed-by="user" \
+        --sort-by="validAfterTime" \
+        --format="value(name)" 2>/dev/null); then
+        warn "Failed to list keys for ${sa_email}. Skipping prune."
+        return
+    fi
+    
+    # Count non-empty lines
+    local count
+    count=$(echo "$keys" | grep -v "^$" | wc -l)
+    
+    log "Found ${count} user-managed keys."
+    
+    # Safety Check: Only prune if SA Email contains Cluster Name
+    # We want to avoid pruning shared SAs (e.g. 'rook-ceph' used by 'nested')
+    if [[ "${sa_email}" != *"${CLUSTER_NAME}"* ]]; then
+        warn "Service Account '${sa_email}' does not appear to belong exclusively to cluster '${CLUSTER_NAME}'."
+        warn "Skipping key pruning to prevent accidental deletion of shared keys."
+        warn "Please manually delete old keys if you hit the 10-key limit (User Managed)."
+        return
+    fi
+
+    # Limit is 10 (User-Managed). Prune if >= 8 to be safe.
+    if [ "$count" -ge 8 ]; then
+        local prune_count=$((count - 5))
+        if [ "$prune_count" -gt 0 ]; then
+            log "Pruning ${prune_count} old keys..."
+            local to_delete
+            to_delete=$(echo "$keys" | head -n "${prune_count}")
+            
+            for key_id in $to_delete; do
+                # Extract basename just in case, though value(name) returns full path usually
+                # But 'keys delete' takes full path or ID. Full path is safer.
+                run_safe gcloud iam service-accounts keys delete "${key_id}" \
+                    --iam-account="${sa_email}" \
+                    --project="${PROJECT_ID}" \
+                    --quiet
+            done
+            log "Pruned old keys."
+        fi
+    fi
+}
+
 deploy_ccm() {
     log "Deploying GCP Cloud Controller Manager..."
     # Determine Route Configuration based on Cilium Mode
@@ -155,6 +209,7 @@ EOF
 
     # Ensure GCP SA Key exists
     if [ ! -f "${GCP_SA_KEY}" ]; then
+        prune_sa_keys "${SA_EMAIL}"
         log "Generating Service Account Key for CCM..."
         gcloud iam service-accounts keys create "${GCP_SA_KEY}" --iam-account="${SA_EMAIL}" --project="${PROJECT_ID}" || true
     fi
@@ -207,84 +262,9 @@ EOF
     rm -f "${OUTPUT_DIR}/gcp-ccm.yaml"
 }
 
-deploy_vip_alias() {
-    log "Deploying VIP Alias DaemonSet (Fixing Node IP issue)..."
-    
-    # 1. Get Control Plane ILB IP (The VIP)
-    local CP_ILB_IP=$(gcloud compute addresses describe "${ILB_CP_IP_NAME}" --region "${REGION}" --format="value(address)" --project="${PROJECT_ID}")
-    
-    # 2. Get CP-0 Direct IP (to bypass VIP for initial apply)
-    local cp_0_name="${CLUSTER_NAME}-cp-0"
-    local CP_0_IP=$(gcloud compute instances describe "${cp_0_name}" --zone "${ZONE}" --format="value(networkInterfaces[0].networkIP)" --project="${PROJECT_ID}")
-    
-    log "VIP: ${CP_ILB_IP}, CP-0 Direct: ${CP_0_IP}"
 
-    # 3. Generate Manifest from Template
-    export CP_ILB_IP
-    # Inline Manifest
-    cat <<EOF > "${OUTPUT_DIR}/vip-alias.yaml"
-apiVersion: apps/v1
-kind: DaemonSet
-metadata:
-  name: vip-alias
-  namespace: kube-system
-  labels:
-    app: vip-alias
-spec:
-  selector:
-    matchLabels:
-      app: vip-alias
-  template:
-    metadata:
-      labels:
-        app: vip-alias
-    spec:
-      hostNetwork: true
-      nodeSelector:
-        node-role.kubernetes.io/control-plane: ""
-      tolerations:
-      - operator: Exists
-      initContainers:
-      - name: alias-vip
-        image: busybox
-        securityContext:
-          privileged: true
-        command:
-        - /bin/sh
-        - -c
-        - |
-          ip link add dummy0 type dummy || true
-          ip link set dummy0 up || true
-          ip addr add ${CP_ILB_IP}/32 dev dummy0 || true
-      containers:
-      - name: pause
-        image: registry.k8s.io/pause:3.9
-EOF
 
-    # 4. Copy to Bastion
-    run_safe gcloud compute scp "${OUTPUT_DIR}/vip-alias.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
 
-    # Apply using Direct IP of CP-0 because VIP is not yet active on nodes
-    log "Applying VIP Alias using Direct IP (${CP_0_IP})..."
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
-        cp ~/.kube/config kubeconfig.direct
-        sed -i 's/${CP_ILB_IP}/${CP_0_IP}/g' kubeconfig.direct
-        
-        for i in {1..20}; do
-            echo \"Attempting to apply VIP Alias (Attempt \$i/20)...\"
-            if kubectl --kubeconfig ./kubeconfig.direct apply -f vip-alias.yaml; then
-                echo \"VIP Alias applied successfully.\"
-                rm vip-alias.yaml kubeconfig.direct
-                exit 0
-            fi
-            echo \"Retrying in 5s...\"
-            sleep 5
-        done
-        echo \"Failed to apply VIP alias after 20 attempts.\"
-        exit 1
-    "
-    rm -f "${OUTPUT_DIR}/vip-alias.yaml"
-}
 
 deploy_csi() {
     log "Deploying GCP Compute Persistent Disk CSI Driver..."
@@ -295,9 +275,12 @@ deploy_csi() {
     
     # Check if key exists locally, regenerate to ensure validity
     if [ -f "${OUTPUT_DIR}/service-account.json" ]; then
-        log "Removing old Service Account Key..."
+        log "Removing old Service Account Key (local)..."
         rm -f "${OUTPUT_DIR}/service-account.json"
     fi
+    
+    # Prune old keys from GMP to avoid hitting limit (10 keys per SA)
+    prune_sa_keys "${SA_EMAIL}"
     
     log "Generating Service Account Key..."
     gcloud iam service-accounts keys create "${OUTPUT_DIR}/service-account.json" --iam-account="${SA_EMAIL}" --project="${PROJECT_ID}" || true

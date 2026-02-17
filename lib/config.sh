@@ -197,6 +197,7 @@ set_names() {
     # 2. Resilient: CLUSTER_NAME-REGION_HASH-sa (Avoids conflicts)
     
     if [ -z "${SA_NAME:-}" ]; then
+        log "DEBUG: set_names (generating): CLUSTER_NAME='${CLUSTER_NAME}', EXISTING_SA_NAME='${SA_NAME:-}'"
         local LEGACY_SA_NAME="${CLUSTER_NAME}-sa"
         local HAS_LEGACY=""
 
@@ -210,22 +211,26 @@ set_names() {
         if [ "$HAS_LEGACY" == "true" ]; then
              SA_NAME="${LEGACY_SA_NAME}"
         else
-             # Generate short hash of region
-             local R_HASH="0000" # Safe default
-             if command -v md5sum &>/dev/null; then
-                 R_HASH=$(echo -n "${REGION}" | md5sum | cut -c1-4)
-             elif command -v cksum &>/dev/null; then
-                 R_HASH=$(echo -n "${REGION}" | cksum | cut -c1-4 | tr -d ' ')
-             fi
-             
-             # Ensure R_HASH didn't end up empty due to pipe failure
-             if [ -z "$R_HASH" ]; then R_HASH="0000"; fi
-             
-             SA_NAME="${CLUSTER_NAME}-${R_HASH}-sa"
+             # Generate short hash of CLUSTER_NAME + REGION to ensure uniqueness per cluster
+            local R_HASH="0000" # Safe default
+            local hash_input="${CLUSTER_NAME}${REGION}"
+            if command -v md5sum &>/dev/null; then
+                R_HASH=$(echo -n "${hash_input}" | md5sum | cut -c1-4)
+            elif command -v cksum &>/dev/null; then
+                R_HASH=$(echo -n "${hash_input}" | cksum | cut -c1-4 | tr -d ' ')
+            fi
+            
+            # Ensure R_HASH didn't end up empty due to pipe failure
+            if [ -z "$R_HASH" ]; then R_HASH="0000"; fi
+            
+            SA_NAME="${CLUSTER_NAME}-${R_HASH}-sa"
         fi
+    else
+        log "DEBUG: set_names (preserved): SA_NAME='${SA_NAME}'"
     fi
 
     SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+    log "DEBUG: set_names resolved SA_NAME='${SA_NAME}', SA_EMAIL='${SA_EMAIL}'"
     
     # Role-specific Service Accounts (Default to the main cluster SA)
     CP_SERVICE_ACCOUNT="${CP_SERVICE_ACCOUNT:-$SA_EMAIL}"

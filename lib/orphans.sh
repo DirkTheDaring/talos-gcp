@@ -19,10 +19,34 @@ add_orphan() {
 }
 
 # 1. Discovery Logic
+# 1. Discovery Logic
 list_orphans() {
     ORPHAN_LIST=() # Reset
     
     log "Scanning Project '${PROJECT_ID}' for orphans..."
+
+    # Helper: Get Active Clusters (Name and Region)
+    # Returns "CLUSTER_NAME|REGION" lines
+    get_active_clusters() {
+        local active_clusters
+        if active_clusters=$(gcloud compute instances list --project="${PROJECT_ID}" --format="value(labels.cluster,zone)" 2>/dev/null | sort | uniq); then
+             while read -r c_name c_zone; do
+                 if [ -n "$c_name" ]; then
+                     # Infer region from zone
+                     local c_region="${c_zone%-*}"
+                     echo "${c_name}|${c_region}"
+                 fi
+             done <<< "$active_clusters"
+        fi
+    }
+
+    # Cache active clusters for reuse
+    local ACTIVE_CLUSTERS_LIST
+    ACTIVE_CLUSTERS_LIST=$(get_active_clusters)
+    if [ -n "$ACTIVE_CLUSTERS_LIST" ]; then
+        log "Active Clusters (for exclusion):"
+        echo "$ACTIVE_CLUSTERS_LIST" | sed 's/^/  -> /'
+    fi
     
     # A. Disks (Unattached)
     log "Scanning for Unattached Disks..."
@@ -57,7 +81,19 @@ list_orphans() {
         while read -r name region address; do
              if [ -n "$name" ]; then
                  local region_name=$(basename "$region")
-                 add_orphan "IP" "$name" "$region_name" "$address" "Network" "$name"
+                 
+                 # Check for Active Ingress
+                 local is_active="false"
+                 if [[ "$name" == *"-ingress-v4-"* ]]; then
+                     local cluster_name="${name%-ingress-v4-*}"
+                     if echo "$ACTIVE_CLUSTERS_LIST" | grep -q "^${cluster_name}|${region_name}$"; then
+                         is_active="true"
+                     fi
+                 fi
+
+                 if [ "$is_active" == "false" ]; then
+                     add_orphan "IP" "$name" "$region_name" "$address" "Network" "$name"
+                 fi
              fi
         done < <(echo "$ips" | jq -r '.[] | "\(.name) \(.region) \(.address)"')
     fi
@@ -158,6 +194,101 @@ list_orphans() {
              fi
         done < <(echo "$storage_fws" | jq -r '.[] | "\(.name) \(.network) \(.creationTimestamp)"')
     fi
+
+    # H. Service Accounts (Orphaned)
+    log "Scanning for Orphaned Service Accounts..."
+    
+    # helper to generate expected SAs
+    generate_expected_sa_names() {
+        local expected_sas=()
+        
+        # 1. Start with current cluster config if loaded
+        if [ -n "${CLUSTER_NAME:-}" ]; then
+             local current_sa="${CLUSTER_NAME}-sa"
+             # Re-calculate hash based on current region
+             local db_hash="0000"
+             local hash_input="${CLUSTER_NAME}${REGION:-}"
+             if command -v md5sum &>/dev/null; then
+                 db_hash=$(echo -n "${hash_input}" | md5sum | cut -c1-4)
+             elif command -v cksum &>/dev/null; then
+                 db_hash=$(echo -n "${hash_input}" | cksum | cut -c1-4 | tr -d ' ')
+             fi
+             local current_sa_hashed="${CLUSTER_NAME}-${db_hash}-sa"
+             
+             expected_sas+=("$current_sa" "$current_sa_hashed")
+        fi
+
+        # 2. Use Cached Active Clusters
+        while read -r line; do
+             if [ -n "$line" ]; then
+                 local c_name="${line%|*}"
+                 local c_region="${line#*|}"
+                 
+                 # Legacy Name
+                 expected_sas+=("${c_name}-sa")
+                 
+                 # Hashed Name
+                 local c_hash="0000"
+                 local c_hash_input="${c_name}${c_region}"
+                 if command -v md5sum &>/dev/null; then
+                     c_hash=$(echo -n "${c_hash_input}" | md5sum | cut -c1-4)
+                 elif command -v cksum &>/dev/null; then
+                     c_hash=$(echo -n "${c_hash_input}" | cksum | cut -c1-4 | tr -d ' ')
+                 fi
+                 expected_sas+=("${c_name}-${c_hash}-sa")
+             fi
+        done <<< "$ACTIVE_CLUSTERS_LIST"
+
+        
+        # 3. Scan local config files (clusters/*.env) as backup
+        # This helps if a cluster is configured but currently has 0 instances
+        if [ -d "clusters" ]; then
+            for env_file in clusters/*.env; do
+                if [ -f "$env_file" ]; then
+                     # Grep CLUSTER_NAME and REGION (crude but safer than sourcing untrusted files in loop)
+                     local f_cluster=$(grep "^CLUSTER_NAME=" "$env_file" | cut -d'"' -f2 || true)
+                     local f_region=$(grep "^REGION=" "$env_file" | cut -d'"' -f2 || true)
+                     
+                     if [ -n "$f_cluster" ]; then
+                         expected_sas+=("${f_cluster}-sa")
+                         
+                         if [ -n "$f_region" ]; then
+                             local f_hash="0000"
+                             local f_hash_input="${f_cluster}${f_region}"
+                             if command -v md5sum &>/dev/null; then
+                                 f_hash=$(echo -n "${f_hash_input}" | md5sum | cut -c1-4)
+                             elif command -v cksum &>/dev/null; then
+                                 f_hash=$(echo -n "${f_hash_input}" | cksum | cut -c1-4 | tr -d ' ')
+                             fi
+                             expected_sas+=("${f_cluster}-${f_hash}-sa")
+                         fi
+                     fi
+                fi
+            done
+        fi
+        
+        # Print unique
+        echo "${expected_sas[@]}" | tr ' ' '\n' | sort | uniq
+    }
+
+    # Build Allowlist
+    local EXPECTED_SAS
+    EXPECTED_SAS=$(generate_expected_sa_names)
+    
+    # List all SAs matching *-sa
+    local found_sas
+    if found_sas=$(gcloud iam service-accounts list --project="${PROJECT_ID}" --filter="email:*-sa@${PROJECT_ID}.iam.gserviceaccount.com" --format="json(email,displayName)" 2>/dev/null); then
+        while read -r sa_email sa_name; do
+             if [ -n "$sa_email" ]; then
+                 local sa_short=${sa_email%@*} # Remove @project...
+                 
+                 # Check if in expected list
+                 if ! echo "$EXPECTED_SAS" | grep -q "^${sa_short}$"; then
+                      add_orphan "SA" "$sa_email" "global" "Not linked to any active cluster config or running instances." "IAM" "$sa_email"
+                 fi
+             fi
+        done < <(echo "$found_sas" | jq -r '.[] | "\(.email) \(.displayName)"')
+    fi
     
     # --- Display ---
     echo ""
@@ -184,144 +315,156 @@ list_orphans() {
 
 # 2. Cleanup Logic
 cleanup_orphans() {
-    list_orphans
-    
-    if [ ${#ORPHAN_LIST[@]} -eq 0 ]; then
-        return 0
-    fi
-    
-    echo ""
-    echo "Select resources to delete."
-    echo "Enter individual IDs (e.g. 1 3 5), ranges (e.g. 1-3), 'all', or 'q' to quit."
-    read -r -p "Selection: " selection
-    
-    if [[ "$selection" == "q" ]] || [[ "$selection" == "quit" ]] || [ -z "$selection" ]; then
-        log "Operation cancelled."
-        return 0
-    fi
-    
-    # Parse Selection
-    local indices=()
-    if [[ "$selection" == "all" ]]; then
-        for ((i=1; i<=${#ORPHAN_LIST[@]}; i++)); do
-            indices+=("$i")
-        done
-    else
-        # Split by space or comma
-        IFS=' ,' read -r -a parts <<< "$selection"
-        for part in "${parts[@]}"; do
-            if [[ "$part" =~ ^[0-9]+$ ]]; then
-                indices+=("$part")
-            elif [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-                local start="${BASH_REMATCH[1]}"
-                local end="${BASH_REMATCH[2]}"
-                for ((i=start; i<=end; i++)); do
-                    indices+=("$i")
-                done
+    while true; do
+        list_orphans
+        
+        if [ ${#ORPHAN_LIST[@]} -eq 0 ]; then
+            log "No orphans found."
+            return 0
+        fi
+        
+        echo ""
+        echo "Select resources to delete."
+        echo "Enter individual IDs (e.g. 1 3 5), ranges (e.g. 1-3), 'all', or 'q' to quit."
+        read -r -p "Selection: " selection
+        
+        if [[ "$selection" == "q" ]] || [[ "$selection" == "quit" ]] || [ -z "$selection" ]; then
+            log "Operation cancelled."
+            return 0
+        fi
+        
+        # Parse Selection
+        local indices=()
+        if [[ "$selection" == "all" ]]; then
+            for ((i=1; i<=${#ORPHAN_LIST[@]}; i++)); do
+                indices+=("$i")
+            done
+        else
+            # Split by space or comma
+            IFS=' ,' read -r -a parts <<< "$selection"
+            for part in "${parts[@]}"; do
+                if [[ "$part" =~ ^[0-9]+$ ]]; then
+                    indices+=("$part")
+                elif [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    local start="${BASH_REMATCH[1]}"
+                    local end="${BASH_REMATCH[2]}"
+                    for ((i=start; i<=end; i++)); do
+                        indices+=("$i")
+                    done
+                fi
+            done
+        fi
+        
+        # Dedup and Sort
+        # Safe multi-line string handling for sort -n -u
+        local sorted_string
+        sorted_string=$(tr ' ' '\n' <<<"${indices[*]}" | sort -n -u)
+        # Convert back to array
+        IFS=$'\n' read -r -d '' -a sorted_indices <<< "$sorted_string" || true
+        
+        # Process Deletion
+        echo ""
+        log "You have selected ${#sorted_indices[@]} resource(s) for deletion."
+        
+        for idx in "${sorted_indices[@]}"; do
+            # Validate Index
+            if [ "$idx" -lt 1 ] || [ "$idx" -gt "${#ORPHAN_LIST[@]}" ]; then
+                 warn "Invalid ID: $idx (Skipping)"
+                 continue
+            fi
+            
+            # Get Item (Array is 0-indexed, ID is 1-indexed)
+            local item="${ORPHAN_LIST[$((idx-1))]}"
+            IFS='|' read -r type name zone details cost raw_id <<< "$item"
+            
+            # Detached Safety Check
+            if [[ "$details" == *"Detached:"* ]]; then
+                 warn "SAFETY WARNING: Resource '${name}' was detached within the last hour!"
+                 warn "Details: $details"
+                 read -r -p "Are you absolutely sure you want to delete it? [y/N] " confirm_force
+                 if [[ ! "$confirm_force" =~ ^[yY]$ ]]; then
+                     log "Skipping '${name}' due to safety check."
+                     continue
+                 fi
+            fi
+
+            # Confirmation
+            echo -e "${RED}DELETE: [${type}] ${name} (${zone})${NC}"
+            read -r -p "Are you SURE? [y/N] " confirm
+            
+            if [[ "$confirm" =~ ^[yY]$ ]]; then
+                 log "Deleting ${type} '${name}'..."
+                 
+                 case "$type" in
+                     "DISK")
+                         if run_safe gcloud compute disks delete "$name" --zone="$zone" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete disk."
+                         fi
+                         ;;
+                     "IP")
+                         if run_safe gcloud compute addresses delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete IP."
+                         fi
+                         ;;
+                     "IMAGE")
+                         if run_safe gcloud compute images delete "$name" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete image."
+                         fi
+                         ;;
+                     "FWD_RULE")
+                         # Also try to clean up the target pool if it's empty?
+                         # For safety, just delete the rule first. User can re-run to see if target pool becomes orphan (not implemented yet, but safe step).
+                         if run_safe gcloud compute forwarding-rules delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete forwarding rule."
+                         fi
+                         ;;
+                     "VPC")
+                         if run_safe gcloud compute networks delete "$name" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete VPC."
+                         fi
+                         ;;
+                     "SCHEDULE")
+                         if run_safe gcloud compute resource-policies delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete Schedule."
+                         fi
+                         ;;
+                     "FIREWALL")
+                         if run_safe gcloud compute firewall-rules delete "$name" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete Firewall."
+                         fi
+                         ;;
+                     "SA")
+                         if run_safe gcloud iam service-accounts delete "$name" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted."
+                         else
+                             error "Failed to delete Service Account."
+                         fi
+                         ;;
+                     *)
+                         error "Unknown resource type: $type"
+                         ;;
+                 esac
+            else
+                 log "Skipped."
             fi
         done
-    fi
-    
-    # Dedup and Sort
-    # Safe multi-line string handling for sort -n -u
-    local sorted_string
-    sorted_string=$(tr ' ' '\n' <<<"${indices[*]}" | sort -n -u)
-    # Convert back to array
-    IFS=$'\n' read -r -d '' -a sorted_indices <<< "$sorted_string" || true
-    
-    # Process Deletion
-    echo ""
-    log "You have selected ${#sorted_indices[@]} resource(s) for deletion."
-    
-    for idx in "${sorted_indices[@]}"; do
-        # Validate Index
-        if [ "$idx" -lt 1 ] || [ "$idx" -gt "${#ORPHAN_LIST[@]}" ]; then
-             warn "Invalid ID: $idx (Skipping)"
-             continue
-        fi
         
-        # Get Item (Array is 0-indexed, ID is 1-indexed)
-        local item="${ORPHAN_LIST[$((idx-1))]}"
-        IFS='|' read -r type name zone details cost raw_id <<< "$item"
-        
-        # Detached Safety Check
-        if [[ "$details" == *"Detached:"* ]]; then
-             warn "SAFETY WARNING: Resource '${name}' was detached within the last hour!"
-             warn "Details: $details"
-             read -r -p "Are you absolutely sure you want to delete it? [y/N] " confirm_force
-             if [[ ! "$confirm_force" =~ ^[yY]$ ]]; then
-                 log "Skipping '${name}' due to safety check."
-                 continue
-             fi
-        fi
-
-        # Confirmation
-        echo -e "${RED}DELETE: [${type}] ${name} (${zone})${NC}"
-        read -r -p "Are you SURE? [y/N] " confirm
-        
-        if [[ "$confirm" =~ ^[yY]$ ]]; then
-             log "Deleting ${type} '${name}'..."
-             
-             case "$type" in
-                 "DISK")
-                     if run_safe gcloud compute disks delete "$name" --zone="$zone" --project="${PROJECT_ID}" --quiet; then
-                         log "Deleted."
-                     else
-                         error "Failed to delete disk."
-                     fi
-                     ;;
-                 "IP")
-                     if run_safe gcloud compute addresses delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
-                         log "Deleted."
-                     else
-                         error "Failed to delete IP."
-                     fi
-                     ;;
-                 "IMAGE")
-                     if run_safe gcloud compute images delete "$name" --project="${PROJECT_ID}" --quiet; then
-                         log "Deleted."
-                     else
-                         error "Failed to delete image."
-                     fi
-                     ;;
-                 "FWD_RULE")
-                     # Also try to clean up the target pool if it's empty?
-                     # For safety, just delete the rule first. User can re-run to see if target pool becomes orphan (not implemented yet, but safe step).
-                     if run_safe gcloud compute forwarding-rules delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
-                         log "Deleted."
-                     else
-                         error "Failed to delete forwarding rule."
-                     fi
-                     ;;
-                 "VPC")
-                     if run_safe gcloud compute networks delete "$name" --project="${PROJECT_ID}" --quiet; then
-                         log "Deleted."
-                     else
-                         error "Failed to delete VPC."
-                     fi
-                     ;;
-                 "SCHEDULE")
-                     if run_safe gcloud compute resource-policies delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
-                         log "Deleted."
-                     else
-                         error "Failed to delete Schedule."
-                     fi
-                     ;;
-                 "FIREWALL")
-                     if run_safe gcloud compute firewall-rules delete "$name" --project="${PROJECT_ID}" --quiet; then
-                         log "Deleted."
-                     else
-                         error "Failed to delete Firewall."
-                     fi
-                     ;;
-                 *)
-                     error "Unknown resource type: $type"
-                     ;;
-             esac
-        else
-             log "Skipped."
-        fi
+        echo ""
+        log "Batch complete. Refreshing list..."
+        # Loop continues, refreshing list_orphans
     done
-    
-    log "Cleanup complete."
 }

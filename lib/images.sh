@@ -162,6 +162,7 @@ ensure_single_image() {
     local version="$2"
     local extensions="$3"
     local kernel_args="$4"
+    local nested_virt="${5:-false}" # Default: false
     
     if [[ "$role" != "cp" && "$role" != "worker" ]]; then
         error "Invalid role: '$role'. Must be 'cp' or 'worker'."
@@ -171,7 +172,7 @@ ensure_single_image() {
     local safe_ver
     safe_ver=$(sanitize_version "$version")
     
-    # Calculate Suffix (Vanilla vs Extended)
+    # Calculate Suffix (Vanilla vs Extended vs Nested)
     local suffix
     if [ -z "$extensions" ] && [ -z "$kernel_args" ]; then
         suffix="gcp-${ARCH}"
@@ -187,6 +188,11 @@ ensure_single_image() {
         local ext_hash
         ext_hash=$(echo "${normalized_ext}|${normalized_kargs}" | md5sum | cut -c1-8)
         suffix="${role}-${ext_hash}-${ARCH}"
+    fi
+
+    # Append 'nv' suffix for Nested Virtualization
+    if [ "$nested_virt" == "true" ]; then
+        suffix="${suffix}-nv"
     fi
     
     local image_name="talos-${safe_ver}-${suffix}"
@@ -229,7 +235,7 @@ ensure_single_image() {
                  installer_image="factory.talos.dev/image/${schematic_id}/${version}/installer"
                  log "Resolved Vanilla image via Factory (Schematic: ${schematic_id})"
              fi
-        fi
+         fi
     fi
     
     # Export variables
@@ -241,7 +247,7 @@ ensure_single_image() {
         export WORKER_INSTALLER_IMAGE="$installer_image"
     fi
     
-    log "[${role^^}] Configured: Image=${image_name}, Installer=${installer_image}"
+    log "[${role^^}] Configured: Image=${image_name}, Installer=${installer_image}, NestedVirt=${nested_virt}"
 
     # 1. Check if Image exists in GCP
     if gcloud compute images describe "${image_name}" --project="${PROJECT_ID}" &> /dev/null; then
@@ -280,10 +286,18 @@ ensure_single_image() {
     fi
 
     # 4. Create GCP Image
-    log "  -> Creating GCP Image resource..."
+    log "  -> Creating GCP Image resource (NestedVirt=${nested_virt})..."
+    
+    local -a LICENSES_FLAG=()
+    if [ "$nested_virt" == "true" ]; then
+        # Required for Nested Virtualization
+        LICENSES_FLAG=("--licenses=projects/vm-options/global/licenses/enable-vmx")
+    fi
+    
     if ! gcloud compute images create "${image_name}" \
         --source-uri="gs://${BUCKET_NAME}/${gcs_object}" \
         --guest-os-features=VIRTIO_SCSI_MULTIQUEUE \
+        "${LICENSES_FLAG[@]}" \
         --project="${PROJECT_ID}" 2>/dev/null; then
         
         if gcloud compute images describe "${image_name}" --project="${PROJECT_ID}" &>/dev/null; then
@@ -315,14 +329,16 @@ ensure_role_images() {
             local safe_pool="${pool//-/_}"
             local pool_ext_var="POOL_${safe_pool^^}_EXTENSIONS"
             local pool_kargs_var="POOL_${safe_pool^^}_KERNEL_ARGS"
+            local pool_nv_var="POOL_${safe_pool^^}_ALLOW_NESTED_VIRT"
             
             # Resolve Pool Specifics -> Generic Pool Defaults -> Global Defaults
             # Note: POOL_EXTENSIONS defaults to WORKER_EXTENSIONS in config.sh, so we just check POOL_EXTENSIONS fallback
             local extensions="${!pool_ext_var:-$POOL_EXTENSIONS}"
             local kernel_args="${!pool_kargs_var:-$POOL_KERNEL_ARGS}"
+            local nested_virt="${!pool_nv_var:-false}"
             
-            log "Ensuring image for pool '${pool}' (Ext: ${extensions}, KArgs: ${kernel_args})..."
-            ensure_single_image "worker" "${WORKER_TALOS_VERSION}" "${extensions}" "${kernel_args}" || return 1
+            log "Ensuring image for pool '${pool}' (Ext: ${extensions}, KArgs: ${kernel_args}, NestedVirt: ${nested_virt})..."
+            ensure_single_image "worker" "${WORKER_TALOS_VERSION}" "${extensions}" "${kernel_args}" "${nested_virt}" || return 1
         done
     else
         # Fallback for legacy single-worker setup

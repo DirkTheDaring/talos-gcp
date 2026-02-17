@@ -88,7 +88,7 @@ list_instances() {
         --filter="labels.cluster=${CLUSTER_NAME}" \
         --project="${PROJECT_ID}" \
         --sort-by=name \
-        --format="table(name, zone.basename(), machineType.basename(), networkInterfaces[0].networkIP:label=INTERNAL_IP, networkInterfaces[0].accessConfigs[0].natIP:label=EXTERNAL_IP, status)")
+        --format="table(name, metadata.items.talos-image:label=TALOS-IMAGE, zone.basename(), machineType.basename(), networkInterfaces[0].networkIP:label=INTERNAL_IP, networkInterfaces[0].accessConfigs[0].natIP:label=EXTERNAL_IP, status)")
 
     if [ -z "$OUTPUT" ]; then
         warn "No instances found for cluster '${CLUSTER_NAME}'."

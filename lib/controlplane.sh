@@ -176,6 +176,27 @@ def patch_file(filename, is_controlplane):
         if 'interfaces' not in data['machine']['network']: data['machine']['network']['interfaces'] = []
         interfaces = data['machine']['network']['interfaces']
 
+        # 10. Control Plane VIP (Loopback Alias)
+        # This solves the race condition where kube-apiserver needs the VIP to start,
+        # but we can't apply a DaemonSet because kube-apiserver isn't running.
+        # We add the VIP as an alias to the loopback interface on Day 0.
+        if is_controlplane:
+            ilb_ip = "${CP_ILB_IP}"
+            if ilb_ip:
+                print(f"DEBUG: Configuring lo with VIP {ilb_ip}...")
+                
+                # Check if lo already exists
+                lo = next((i for i in interfaces if i.get('interface') == 'lo'), None)
+                if not lo:
+                    lo = {'interface': 'lo'}
+                    interfaces.append(lo)
+                
+                # Configure VIP on lo
+                if 'addresses' not in lo: lo['addresses'] = []
+                vip_cidr = f"{ilb_ip}/32"
+                if vip_cidr not in lo['addresses']:
+                    lo['addresses'].append(vip_cidr)
+
         # 8. Global Network Configuration
         nic0 = next((i for i in interfaces if i.get('deviceSelector', {}).get('busPath') == '0*'), None)
         if not nic0:
@@ -293,6 +314,7 @@ provision_controlplane_nodes() {
                 --tags "talos-controlplane,${cp_name}" \
                 --service-account="${CP_SERVICE_ACCOUNT}" --scopes cloud-platform \
                 --labels="${LABELS:+${LABELS},}cluster=${CLUSTER_NAME},talos-version=${CP_TALOS_VERSION//./-},k8s-version=${KUBECTL_VERSION//./-},cilium-version=${CILIUM_VERSION//./-}" \
+                --metadata=talos-image="${CP_IMAGE_NAME}" \
                 --metadata-from-file=user-data="${OUTPUT_DIR}/controlplane.yaml"
         else
             # Existing Instance Check
