@@ -94,6 +94,16 @@ def patch_file(filename, is_controlplane):
             data['machine']['sysctls']['net.ipv4.ip_forward'] = "1"
             data['machine']['sysctls']['net.ipv6.conf.all.forwarding'] = "1"
 
+        # 4.5 Graceful Node Shutdown
+        if 'machine' not in data: data['machine'] = {}
+        if 'kubelet' not in data['machine']: data['machine']['kubelet'] = {}
+        data['machine']['kubelet']['shutdownGracePeriod'] = "30s"
+        data['machine']['kubelet']['shutdownGracePeriodCriticalPods'] = "10s"
+        
+        # Ensure feature gate (usually default, but explicit doesn't hurt)
+        if 'extraArgs' not in data['machine']['kubelet']: data['machine']['kubelet']['extraArgs'] = {}
+        data['machine']['kubelet']['extraArgs']['graceful-node-shutdown'] = 'true'
+
         # 5. Enable KubePrism (Port 7445)
         if 'machine' not in data: data['machine'] = {}
         if 'features' not in data['machine']: data['machine']['features'] = {}

@@ -320,6 +320,14 @@ case "$COMMAND" in
         source "${SCRIPT_DIR}/lib/rook.sh"
         install_ceph_client
         ;;
+    install-maintenance)
+        set_names
+        check_dependencies
+        # Ensure we have admin access to the bastion
+        ensure_admin_access
+        export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
+        install_maintenance
+        ;;
     update-rook-ceph)
         set_names
         check_dependencies

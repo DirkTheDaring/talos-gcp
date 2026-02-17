@@ -62,6 +62,7 @@ ${YELLOW}Commands:${NC}
   ${GREEN}update-schedule${NC}         Update the instance schedule (shutdown/startup times)
   ${GREEN}orphans${NC}                 List orphan resources (disks/IPs) not attached to the cluster
   ${GREEN}orphans clean${NC}           Cleanup orphan resources
+  ${GREEN}install-maintenance${NC}     Install maintenance services (Alias Sync) on Bastion
 
   ${BLUE}--- Storage ---${NC}
   ${GREEN}verify-storage${NC}          Verify CSI Driver and Persistent Volume functionality
