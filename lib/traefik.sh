@@ -60,9 +60,15 @@ EOF
     run_safe gcloud compute scp "${OUTPUT_DIR}/traefik-values.system.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
     
     # Ensure Kubeconfig (Critical for Helm)
+    # Prefer Bastion's existing config (Source of Truth) to avoid overwriting with stale local config
+    if gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "test -s .kube/config" -- -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null &>/dev/null; then
+        log "Pulling latest kubeconfig from Bastion..."
+        run_safe gcloud compute scp "${BASTION_NAME}:~/.kube/config" "${OUTPUT_DIR}/kubeconfig" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap
+    fi
+
     if [ -f "${OUTPUT_DIR}/kubeconfig" ]; then
         log "Ensuring Bastion has latest kubeconfig..."
-        run_safe gcloud compute scp "${OUTPUT_DIR}/kubeconfig" "${BASTION_NAME}:~/.kube/config" --zone "${ZONE}" --tunnel-through-iap
+        run_safe gcloud compute scp "${OUTPUT_DIR}/kubeconfig" "${BASTION_NAME}:~/.kube/config" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap
     else
         warn "Kubeconfig not found locally at ${OUTPUT_DIR}/kubeconfig. Helm might fail if not already configured on Bastion."
     fi
