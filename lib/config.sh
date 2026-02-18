@@ -137,6 +137,7 @@ check_cluster_name() {
 
 # Calculate Resource Names based on CLUSTER_NAME
 set_names() {
+    local skip_sa_check="${1:-false}"
     check_cluster_name
     
     # Ensure BUCKET_NAME is set (defaults to project-id-talos-images if not provided)
@@ -197,12 +198,11 @@ set_names() {
     # 2. Resilient: CLUSTER_NAME-REGION_HASH-sa (Avoids conflicts)
     
     if [ -z "${SA_NAME:-}" ]; then
-        log "DEBUG: set_names (generating): CLUSTER_NAME='${CLUSTER_NAME}', EXISTING_SA_NAME='${SA_NAME:-}'"
         local LEGACY_SA_NAME="${CLUSTER_NAME}-sa"
         local HAS_LEGACY=""
 
-        # Check if Legacy SA exists (Only if PROJECT_ID is available)
-        if [ -n "${PROJECT_ID:-}" ]; then
+        # Check if Legacy SA exists (Only if PROJECT_ID is available AND skip_sa_check is false)
+        if [ "$skip_sa_check" != "true" ] && [ -n "${PROJECT_ID:-}" ]; then
             if gcloud iam service-accounts list --filter="email:${LEGACY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" --format="value(email)" --project="${PROJECT_ID}" 2>/dev/null | grep -q "${LEGACY_SA_NAME}"; then
                 HAS_LEGACY="true"
             fi
@@ -230,7 +230,6 @@ set_names() {
     fi
 
     SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-    log "DEBUG: set_names resolved SA_NAME='${SA_NAME}', SA_EMAIL='${SA_EMAIL}'"
     
     # Role-specific Service Accounts (Default to the main cluster SA)
     CP_SERVICE_ACCOUNT="${CP_SERVICE_ACCOUNT:-$SA_EMAIL}"

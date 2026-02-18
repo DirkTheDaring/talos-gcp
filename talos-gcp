@@ -72,7 +72,7 @@ export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 # Detect Project ID
 # Use configured value if set, otherwise auto-detect
 if [ -z "${PROJECT_ID:-}" ]; then
-    PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
+    PROJECT_ID=$(gcloud config get-value project 2>/dev/null || true)
 fi
 
 if [ -z "${PROJECT_ID:-}" ]; then
@@ -164,8 +164,13 @@ case "$COMMAND" in
         check_dependencies
         diagnose_network
         ;;
-    list-clusters|list)
+    diagnose-ccm)
         set_names
+        check_dependencies
+        diagnose_ccm
+        ;;
+    list-clusters|list)
+        set_names "true"
         # check_dependencies - Not needed
         list_clusters
         ;;
@@ -177,7 +182,7 @@ case "$COMMAND" in
         ssh_command "$@"
         ;;
     get-credentials)
-        set_names
+        set_names "true"
         check_dependencies
         export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
         get_credentials
@@ -188,12 +193,12 @@ case "$COMMAND" in
         update_cilium
         ;;
     list-instances)
-        set_names
+        set_names "true"
         # check_dependencies - Not needed, only uses gcloud
         list_instances
         ;;
     list-ports)
-        set_names
+        set_names "true"
         # check_dependencies - Not needed
         list_ports
         ;;
@@ -203,7 +208,7 @@ case "$COMMAND" in
         update_ports
         ;;
     public-ip)
-        set_names
+        set_names "true"
         # check_dependencies - Not needed
         public_ip
         ;;
@@ -263,7 +268,7 @@ case "$COMMAND" in
         ;;
 
     list-admins)
-        set_names
+        set_names "true"
         log "Listing users with 'roles/compute.osAdminLogin' (Bastion Admins)..."
         gcloud projects get-iam-policy "${PROJECT_ID}" \
             --flatten="bindings[].members" \
@@ -272,17 +277,17 @@ case "$COMMAND" in
         ;;
 
     verify-storage)
-        set_names
+        set_names "true"
         check_dependencies
         verify_storage
         ;;
     verify-connectivity)
-        set_names
+        set_names "true"
         check_dependencies
         verify_connectivity
         ;;
     verify-ccm)
-        set_names
+        set_names "true"
         check_dependencies
         verify_ccm
         ;;
@@ -337,7 +342,7 @@ case "$COMMAND" in
         deploy_rook
         ;;
     orphans)
-        set_names
+        set_names "true"
         check_dependencies
         if [[ "${2:-}" == "clean" ]] || [[ "${2:-}" == "cleanup" ]]; then
              cleanup_orphans
@@ -346,7 +351,7 @@ case "$COMMAND" in
         fi
         ;;
     access-info)
-        set_names
+        set_names "true"
         # check_dependencies - Not needed
         access_info
         ;;

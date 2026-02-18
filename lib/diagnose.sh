@@ -46,3 +46,28 @@ diagnose_network() {
     log "--- Cilium Status (Quick Check) ---"
     run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl -n kube-system get ds cilium" || warn "Failed to get Cilium DS"
 }
+
+diagnose_ccm() {
+    log "Diagnosing GCP Cloud Controller Manager (CCM)..."
+    set_names
+    
+    # 1. Check Pod Status
+    log "checking CCM Pod Status..."
+    if ! run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl -n kube-system get pods -l k8s-app=gcp-cloud-controller-manager -o wide"; then
+        warn "Failed to get CCM pods."
+        return 1
+    fi
+    
+    # 2. Fetch Logs (Last 100 lines, looking for errors)
+    log "Fetching recent CCM Logs (Errors/Warnings)..."
+    # We use a pattern to find the pod name dynamically
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
+        POD=\$(kubectl -n kube-system get pods -l k8s-app=gcp-cloud-controller-manager -o jsonpath='{.items[0].metadata.name}')
+        if [ -n \"\$POD\" ]; then
+            echo \"Logs for \$POD:\"
+            kubectl -n kube-system logs \$POD --tail=50 | grep -iE 'error|fail|route|cidr|sync' || echo 'No obvious errors found in recent logs.'
+        else
+            echo 'CCM Pod not found.'
+        fi
+    "
+}

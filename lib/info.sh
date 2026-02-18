@@ -3,78 +3,84 @@
 list_clusters() {
     log "Scanning project ${PROJECT_ID} for Talos clusters..."
 
-    # 1. Get Unique Cluster Names
-    # Filter by instances having the talos-version label (indicates new structure)
-    # OR we can fallback to just cluster label for broader discovery.
-    # Using 'labels.cluster:*' covers both.
-    local CLUSTER_NAMES
-    CLUSTER_NAMES=$(gcloud compute instances list \
-        --filter="labels.cluster:*" \
-        --format="value(labels.cluster)" \
-        --project="${PROJECT_ID}" | sort | uniq)
+    # Check for required tools
+    for cmd in jq column; do
+        if ! command -v "$cmd" &> /dev/null; then
+            error "Command '$cmd' is required for list-clusters but not installed."
+            return 1
+        fi
+    done
+
+    # 1. Fetch Data in Parallel
+    # We use temp files to store JSON outputs
+    local INSTANCES_FILE=$(mktemp)
+    local ADDRESSES_FILE=$(mktemp)
+    local FWD_RULES_FILE=$(mktemp)
+    local TABLE_FILE=$(mktemp)
     
-    if [ -z "$CLUSTER_NAMES" ]; then
-        echo "No Talos clusters found in project ${PROJECT_ID}."
-        return
+    # Ensure cleanup
+    trap "rm -f '$INSTANCES_FILE' '$ADDRESSES_FILE' '$FWD_RULES_FILE' '$TABLE_FILE'" RETURN
+
+    # Fetch Instances (Cluster Nodes + Bastions)
+    # Filter: Has cluster label OR is a bastion (ends in -bastion)
+    gcloud compute instances list \
+        --filter="labels.cluster:* OR name ~ .*bastion$" \
+        --project="${PROJECT_ID}" \
+        --format="json(name, zone.basename(), status, labels, networkInterfaces[0].accessConfigs[0].natIP, networkInterfaces[0].networkIP)" > "$INSTANCES_FILE" &
+    local PID_INST=$!
+
+    # Fetch External IPs (Reserved Addresses)
+    gcloud compute addresses list \
+        --filter="name ~ .*ingress-v4-0$" \
+        --project="${PROJECT_ID}" \
+        --format="json(name, address, region.basename())" > "$ADDRESSES_FILE" &
+    local PID_ADDR=$!
+
+    # Fetch Forwarding Rules (Legacy Fallback)
+    gcloud compute forwarding-rules list \
+        --filter="name ~ .*ingress.*" \
+        --project="${PROJECT_ID}" \
+        --format="json(name, IPAddress, region.basename())" > "$FWD_RULES_FILE" &
+    local PID_FWD=$!
+
+    if ! wait $PID_INST $PID_ADDR $PID_FWD; then
+        log "Warning: One or more background gcloud commands failed."
+    fi
+
+    
+    # 2. Check if we found any clusters (Safe check without jq -e)
+    if ! grep -q '"cluster":' "$INSTANCES_FILE"; then
+         log "No Talos clusters found in project ${PROJECT_ID}."
+         rm -f "$INSTANCES_FILE" "$ADDRESSES_FILE" "$FWD_RULES_FILE" "$TABLE_FILE"
+         return
+    fi
+
+    jq -r -s '
+    (["CLUSTER NAME", "ZONE", "TALOS VERSION", "K8S VERSION", "CILIUM VERSION", "PUBLIC IP", "BASTION IP"] | @tsv),
+    (.[1] | map({key: (.name | sub("-ingress-v4-0$"; "")), value: .address}) | from_entries) as $addr_map |
+    (.[2] | map({key: (.name | sub("-ingress.*"; "")), value: .IPAddress}) | from_entries) as $fwd_map |
+    ($fwd_map + $addr_map) as $ip_map |
+    (.[0] | map(select(.name | test("-bastion$"))) | map({key: (.name | sub("-bastion$"; "")), value: ((.networkInterfaces[0].accessConfigs[0].natIP // .networkInterfaces[0].networkIP) // "None")}) | from_entries) as $bastion_map |
+    (.[0] | map(select(.labels.cluster != null))) | group_by(.labels.cluster)[] |
+    (.[0].labels.cluster) as $cluster |
+    (.[0].zone) as $zone |
+    (map(select(.labels["talos-version"] != null)) | .[0] // .[0]) as $ver_node |
+    ($ver_node.labels["talos-version"] // "unknown" | gsub("-"; ".")) as $talos_ver |
+    ($ver_node.labels["k8s-version"] // "unknown" | gsub("-"; ".")) as $k8s_ver |
+    ($ver_node.labels["cilium-version"] // "unknown" | gsub("-"; ".")) as $cilium_ver |
+    ($ip_map[$cluster] // "Pending/None") as $public_ip |
+    ($bastion_map[$cluster] // "None") as $bastion_ip |
+    [$cluster, $zone, $talos_ver, $k8s_ver, $cilium_ver, $public_ip, $bastion_ip] | @tsv
+    ' "$INSTANCES_FILE" "$ADDRESSES_FILE" "$FWD_RULES_FILE" > "$TABLE_FILE" || true
+    
+    if [ -s "$TABLE_FILE" ]; then
+         column -t -s $'\t' < "$TABLE_FILE" || true
+    else
+         # Fallback if jq produced nothing but grep found clusters (shouldn't happen)
+         warn "Cluster data processed but table is empty. Raw instances found."
     fi
     
-    # 2. Print Header
-    printf "%-30s %-15s %-15s %-15s %-15s %-20s %-20s\n" "CLUSTER NAME" "ZONE" "TALOS VERSION" "K8S VERSION" "CILIUM VERSION" "PUBLIC IP" "BASTION IP"
-
-    
-    for cluster in $CLUSTER_NAMES; do
-        # Get Version Info (Take first instance's version)
-        local VER_INFO
-        VER_INFO=$(gcloud compute instances list --filter="labels.cluster=${cluster} AND labels.talos-version:*" --limit=1 --format="value(zone.basename(), labels.talos-version, labels.k8s-version, labels.cilium-version)" --project="${PROJECT_ID}")
-        
-        # Read into variables (tab separated by default gcloud value format? distinct args?)
-        # value(a,b) output is tab-separated.
-        local CLUSTER_ZONE
-        local TALOS_VER
-        local K8S_VER
-        local CILIUM_VER
-        read -r CLUSTER_ZONE TALOS_VER K8S_VER CILIUM_VER <<< "$VER_INFO"
-        
-        # Restore versions (hyphen to dot)
-        TALOS_VER="${TALOS_VER//-/.}"
-        K8S_VER="${K8S_VER//-/.}"
-        CILIUM_VER="${CILIUM_VER//-/.}"
-        
-        if [ -z "$TALOS_VER" ]; then TALOS_VER="unknown"; fi
-        if [ -z "$K8S_VER" ]; then K8S_VER="unknown"; fi
-        if [ -z "$CILIUM_VER" ]; then CILIUM_VER="unknown"; fi
-        
-        # Determine Region
-        local CLUSTER_REGION="${CLUSTER_ZONE%-*}"
-
-        # Get Public IP
-        # 1. Try to fetch the Reserved Static IP (Preferred for CCM/Traefik)
-        local IP=""
-        local IP_NAME="${cluster}-ingress-v4-0"
-        
-        if gcloud compute addresses describe "${IP_NAME}" --region "${CLUSTER_REGION}" --project="${PROJECT_ID}" &> /dev/null; then
-             IP=$(gcloud compute addresses describe "${IP_NAME}" --region "${CLUSTER_REGION}" --format="value(address)" --project="${PROJECT_ID}")
-        fi
-        
-        # 2. Fallback: Check for Manual Forwarding Rules (Legacy / HostPort)
-        if [ -z "$IP" ]; then
-             IP=$(gcloud compute forwarding-rules list --filter="name~'^${cluster}-ingress.*'" --limit=1 --format="value(IPAddress)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
-        fi
-
-        if [ -z "$IP" ]; then IP="Pending/None"; fi
-
-        # Get Bastion IP (Internal preferred for IAP)
-        local BASTION_IPS
-        BASTION_IPS=$(gcloud compute instances list --filter="name=${cluster}-bastion" --limit=1 --format="value(networkInterfaces[0].networkIP,networkInterfaces[0].accessConfigs[0].natIP)" --project="${PROJECT_ID}" 2>/dev/null)
-        local BASTION_INT BASTION_EXT
-        read -r BASTION_INT BASTION_EXT <<< "$BASTION_IPS"
-        
-        local BASTION_DISPLAY="${BASTION_INT:-$BASTION_EXT}"
-        if [ -z "$BASTION_DISPLAY" ]; then BASTION_DISPLAY="None"; fi
-        
-        printf "%-30s %-15s %-15s %-15s %-15s %-20s %-20s\n" "$cluster" "$CLUSTER_ZONE" "$TALOS_VER" "$K8S_VER" "$CILIUM_VER" "$IP" "$BASTION_DISPLAY"
-    done
-    echo ""
+    rm -f "$TABLE_FILE"
 }
 
 list_instances() {
@@ -95,7 +101,6 @@ list_instances() {
     else
         echo "$OUTPUT"
     fi
-    echo ""
 }
 
 list_ports() {

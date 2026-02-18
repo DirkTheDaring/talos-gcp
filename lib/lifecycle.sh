@@ -206,17 +206,26 @@ deploy_all() {
          wait_for_api_reachability "${CP_VIP}" "6443" || return 1
     fi
 
-    # 7. K8s Networking (VIP Alias & CNI)
+    # 7. CCM (Deploy First & Wait)
+    # Allows Node IPAM/Alias assignment before CNI starts
+    deploy_ccm
+    wait_for_ccm
+    
+    # 8. K8s Networking (Cilium)
+    # Now starts with populated PodCIDRs
     provision_k8s_networking || return 1
     
-    # 8. K8s Addons (CCM & CSI)
-    provision_k8s_addons || return 1
+    # 9. CSI (Storage)
+    deploy_csi
     
     # 9. Workers (Created only AFTER CNI is ready)
     provision_workers || return 1
 
     # Ensure Native Routing Aliases are correct (Fix for GCP inconsistencies)
     # 9a. Fix Aliases (Immediately after workers are created)
+    # Ensure Native Routing Aliases are correct (Fix for GCP inconsistencies)
+    # 9a. Fix Aliases (Catch-all for Workers)
+    # This will check ALL nodes (CP + Workers). Any missing aliases will result in a reboot.
     fix_aliases
 
     # 9b. Apply Node Pool Labels/Taints

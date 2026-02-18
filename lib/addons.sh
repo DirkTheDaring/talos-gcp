@@ -47,8 +47,13 @@ prune_sa_keys() {
     fi
     
     # Count non-empty lines
-    local count
-    count=$(echo "$keys" | grep -v "^$" | wc -l)
+    # Count non-empty lines
+    local count=0
+    if [ -n "$keys" ]; then
+        # grep -c prints the count. If count is 0, grep exits with 1.
+        # We use || true to prevent set -e from killing the script, while capturing the '0' output.
+        count=$(echo "$keys" | grep -c -v "^$" || true)
+    fi
     
     log "Found ${count} user-managed keys."
     
@@ -260,6 +265,35 @@ EOF
         exit 1
     "
     rm -f "${OUTPUT_DIR}/gcp-ccm.yaml"
+}
+
+wait_for_ccm() {
+    log "Waiting for CCM to become Active and assign PodCIDRs..."
+    
+    # 1. Wait for Pod Running
+    log "Waiting for gcp-cloud-controller-manager Pod to be Running..."
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
+        kubectl wait --for=condition=Ready pod -l k8s-app=gcp-cloud-controller-manager -n kube-system --timeout=300s || echo 'Warning: CCM Pod not Ready yet.'
+    "
+
+    # 2. Wait for IPAM (PodCIDR assignment)
+    log "Waiting for PodCIDR assignment on Control Plane node..."
+    local cp_node="${CLUSTER_NAME}-cp-0"
+    
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "
+        for i in {1..60}; do
+            CIDR=\$(kubectl get node ${cp_node} -o jsonpath='{.spec.podCIDR}' 2>/dev/null)
+            if [ -n \"\$CIDR\" ]; then
+                echo \"✅ Node ${cp_node} has PodCIDR: \$CIDR\"
+                exit 0
+            fi
+            echo \"Waiting for CCM to assign PodCIDR... (Attempt \$i/60)\"
+            sleep 5
+        done
+        echo \"ERROR: Timeout waiting for PodCIDR assignment. CCM might be broken.\"
+        echo \"Check logs: kubectl logs -n kube-system -l k8s-app=gcp-cloud-controller-manager\"
+        exit 1
+    "
 }
 
 

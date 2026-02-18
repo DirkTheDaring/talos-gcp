@@ -626,6 +626,8 @@ fix_aliases() {
         fi
     done
 
+    local -a nodes_to_reboot=()
+    
     # --- Phase 2: Set Correct Aliases ---
     for node in "${!k8s_cidrs[@]}"; do
         local target="${k8s_cidrs[$node]}"
@@ -634,17 +636,101 @@ fix_aliases() {
         # Only proceed if we have a valid target CIDR
         if [ -n "$target" ] && [ "$target" != "<none>" ]; then
             if [ "$current" != "$target" ]; then
-                log "Setting Alias IP for $node to $target..."
+                log "Refining Alias IP for $node: Current='$current', Target='$target'..."
+                
+                # SAFE REPAIR STRATEGY:
+                # Updating the alias on a running Talos node breaks the DHCP lease/connectivity.
+                # We collect nodes to reboot and handle them in batch.
+                
+                # 1. Update Alias
                 run_safe gcloud compute instances network-interfaces update "$node" --zone "$ZONE" --project="$PROJECT_ID" --aliases "pods:${target}"
+                
+                nodes_to_reboot+=("$node")
                 ((changes_made++))
             fi
         fi
     done
     
+    # --- Phase 3: Batch Reboot and Wait ---
+    if [ ${#nodes_to_reboot[@]} -gt 0 ]; then
+        local node_list="${nodes_to_reboot[*]}"
+        warn "⚠️  Safe Repair Triggered for: ${node_list}"
+        warn "   Broadcasting REBOOT to restore connectivity..."
+        
+        # 1. Batch Reboot
+        run_safe gcloud compute instances reset ${node_list} --zone "$ZONE" --project="$PROJECT_ID" --quiet
+        
+        # 2. Resolve IPs LOCALLY (Bastion does not have gcloud)
+        log "Resolving IPs for recovery check..."
+        local -a target_ips=()
+        for node in "${nodes_to_reboot[@]}"; do
+            local ip
+            if ip=$(gcloud compute instances describe "$node" --zone "$ZONE" --format="value(networkInterfaces[0].networkIP)" --project="$PROJECT_ID"); then
+                target_ips+=("$ip")
+            else
+                warn "Could not resolve IP for $node. It will be skipped in recovery check."
+            fi
+        done
+        
+        if [ ${#target_ips[@]} -eq 0 ]; then
+            warn "No IPs resolved. Skipping recovery check."
+        else
+            # 3. Wait for Recovery (5 Minutes)
+            log "Waiting for nodes to recover (Timeout: 5m)..."
+            local ip_string="${target_ips[*]}"
+            
+            # Construct a check loop for ALL nodes
+            # We pass the IPs as a string to the bastion script.
+            local check_script="
+                ips=\"${ip_string}\"
+                # Split space-separated string into array
+                IFS=' ' read -r -a ip_array <<< \"\${ips}\"
+                
+                timeout=300 # 5 minutes
+                start_time=\$(date +%s)
+                
+                echo \"Checking recovery for IPs: \${ips}\"
+                
+                while true; do
+                    current_time=\$(date +%s)
+                    elapsed=\$((current_time - start_time))
+                    
+                    if [ \$elapsed -ge \$timeout ]; then
+                        echo 'ERROR: Timeout waiting for nodes to recover.'
+                        exit 1
+                    fi
+                    
+                    all_up=true
+                    for ip in \"\${ip_array[@]}\"; do
+                        if ! ping -c 1 -W 1 \"\$ip\" >/dev/null 2>&1; then
+                            all_up=false
+                            # Check next IP
+                        fi
+                    done
+                    
+                    if [ \"\$all_up\" = true ]; then
+                        echo 'All nodes recovered successfully.'
+                        exit 0
+                    fi
+                    
+                    echo \"Waiting for nodes... (\$elapsed/\${timeout}s)\"
+                    sleep 5
+                done
+            "
+            
+            if ! run_on_bastion "$check_script"; then
+                error "One or more nodes failed to recover after 5 minutes. Aborting deployment."
+                return 1
+            fi
+        fi
+    fi
+    
     if [ $changes_made -eq 0 ]; then
         log "All Alias IPs are correct. No changes made."
     else
-        log "Alias IP synchronization complete ($changes_made updates)."
+        log "Alias IP synchronization complete ($changes_made updates with reboots)."
+        # Force a short sleep to allow api-server/etcd to stabilize
+        sleep 10
     fi
 }
 
