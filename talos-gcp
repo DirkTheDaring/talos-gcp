@@ -8,8 +8,9 @@
 set -euo pipefail
 
 # Configuration
-SCRIPT_DIR="$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/utils.sh"
+source "${SCRIPT_DIR}/lib/checks.sh"
 
 CONFIG_FILE="${TALOS_GCP_CONFIG:-}"
 ARGS=()
@@ -33,7 +34,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             # Source help library if available for global help, or defer to usage
             # We defer to check dependencies or direct source
-            source "$(dirname "$0")/lib/help.sh"
+            source "${SCRIPT_DIR}/lib/help.sh"
             show_help
             exit 0
             ;;
@@ -86,28 +87,39 @@ REGION=${REGION:-"us-central1"}
 ZONE=${ZONE:-"${REGION}-b"}
 
 # Import Libraries (Order matters for overrides/defaults)
-source "${SCRIPT_DIR}/lib/network.sh"
+# Infrastructure & Networking
+source "${SCRIPT_DIR}/lib/network_core.sh"
+source "${SCRIPT_DIR}/lib/network_ingress.sh"
 source "${SCRIPT_DIR}/lib/bastion.sh"
+source "${SCRIPT_DIR}/lib/network_alias.sh"
+source "${SCRIPT_DIR}/lib/orphans.sh"
 source "${SCRIPT_DIR}/lib/controlplane.sh"
+
+# Configuration & Generators
+source "${SCRIPT_DIR}/lib/images.sh"
+source "${SCRIPT_DIR}/lib/gen.sh"
+
+# Workloads
 source "${SCRIPT_DIR}/lib/workers.sh"
 source "${SCRIPT_DIR}/lib/cni.sh"
+source "${SCRIPT_DIR}/lib/addons.sh"
 
-# New Libraries
-source "${SCRIPT_DIR}/lib/images.sh"
+# Lifecycle & Operations
 source "${SCRIPT_DIR}/lib/connect.sh"
 source "${SCRIPT_DIR}/lib/info.sh"
-source "${SCRIPT_DIR}/lib/addons.sh"
 source "${SCRIPT_DIR}/lib/peering.sh"
 source "${SCRIPT_DIR}/lib/verify.sh"
 source "${SCRIPT_DIR}/lib/bootstrap.sh"
+source "${SCRIPT_DIR}/lib/cleanup.sh"
 source "${SCRIPT_DIR}/lib/lifecycle.sh"
 source "${SCRIPT_DIR}/lib/ops.sh"
+
+# Features
 source "${SCRIPT_DIR}/lib/schedule.sh"
 source "${SCRIPT_DIR}/lib/traefik.sh"
 source "${SCRIPT_DIR}/lib/orphans.sh"
 source "${SCRIPT_DIR}/lib/access.sh"
 source "${SCRIPT_DIR}/lib/binaries.sh"
-source "${SCRIPT_DIR}/lib/gen.sh"
 source "${SCRIPT_DIR}/lib/diagnose.sh"
 source "${SCRIPT_DIR}/lib/service.sh"
 
@@ -124,7 +136,7 @@ if [ $# -lt 1 ]; then
 fi
 
 COMMAND="$1"
-echo "DEBUG: Parsed command: $COMMAND" >&2
+# echo "DEBUG: Parsed command: $COMMAND" >&2  <-- Removed noisy debug
 case "$COMMAND" in
     gen-config)
         # Standalone config generation (Mocked)
@@ -133,12 +145,16 @@ case "$COMMAND" in
         cmd_gen_config
         ;;
     create)
+        if [[ "${2:-}" == "-y" ]] || [[ "${2:-}" == "--yes" ]]; then
+            export CONFIRM_CHANGES="false"
+            shift
+        fi
         check_dependencies
+        check_peers
         # Ensure tools
         export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
         export KUBECTL=$(ensure_tool "kubectl" "${KUBECTL_VERSION}")
         
-        check_quotas
         deploy_all
         ;;
     destroy)
@@ -220,17 +236,22 @@ case "$COMMAND" in
             shift
         fi
         check_dependencies
-        check_quotas
+        check_peers
         export TALOSCTL=$(ensure_tool "talosctl" "${TALOS_VERSION}")
         export KUBECTL=$(ensure_tool "kubectl" "${KUBECTL_VERSION}")
         apply
         ;;
+    list-peers|get-peers)
+        set_names "true"
+        check_dependencies
+        list_peers
+        ;;
 
     recreate-bastion)
         set_names
-        check_dependencies || return 1
+        check_dependencies || exit 1
 
-        ensure_service_account || return 1
+        ensure_service_account || exit 1
         ensure_admin_access # Ensure we have rights to login to the new one
         
         log "Recreating Bastion Host '${BASTION_NAME}'..."
@@ -240,9 +261,9 @@ case "$COMMAND" in
             run_safe gcloud compute instances delete "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --quiet
         fi
         
-        # Re-run Phase 2b and Phase 4
-        phase2_bastion
-        phase4_bastion
+        # Re-run Bastion Provisioning
+        provision_bastion
+        configure_bastion
         
         log "Bastion recreated successfully."
         ;;

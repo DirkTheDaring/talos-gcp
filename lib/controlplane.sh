@@ -332,9 +332,15 @@ provision_controlplane_nodes() {
     done
 
     # 5. Attach IG to Backend Service (Must be done AFTER instances exist so IG has a network)
-    if ! gcloud compute backend-services describe "${BE_CP_NAME}" --region "${REGION}" --project="${PROJECT_ID}" | grep -q "group: .*${IG_CP_NAME}"; then
+    # 5. Attach IG to Backend Service (Must be done AFTER instances exist so IG has a network)
+    local existing_backends
+    existing_backends=$(gcloud compute backend-services describe "${BE_CP_NAME}" --region "${REGION}" --format="value(backends[].group)" --project="${PROJECT_ID}" 2>/dev/null || echo "")
+    
+    if [[ "$existing_backends" != *"${IG_CP_NAME}"* ]]; then
          log "Attaching Instance Group ${IG_CP_NAME} to Backend Service ${BE_CP_NAME}..."
          run_safe gcloud compute backend-services add-backend "${BE_CP_NAME}" --region "${REGION}" --instance-group "${IG_CP_NAME}" --instance-group-zone "${ZONE}" --project="${PROJECT_ID}"
+    else
+         log "Instance Group ${IG_CP_NAME} is already attached to Backend Service ${BE_CP_NAME}."
     fi
 }
 

@@ -140,6 +140,69 @@ deploy_rook() {
     deploy_rook_cluster
 }
 
+ensure_rook_secrets() {
+    local namespace="rook-ceph"
+    local secret_name="rook-ceph-admin-keyring"
+    
+    log "Ensuring Rook Ceph secrets exist..."
+    
+    # Check if secret exists
+    if run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n ${namespace} get secret ${secret_name}" &>/dev/null; then
+        log "Secret '${secret_name}' exists."
+        return 0
+    fi
+    
+    warn "Secret '${secret_name}' is missing. Checking if we can recover it from running monitors..."
+    
+    # Attempt to find a running monitor pod
+    local mon_pod
+    mon_pod=$(run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "kubectl -n ${namespace} get pods -l app=rook-ceph-mon -o jsonpath='{.items[0].metadata.name}' 2>/dev/null")
+    
+    if [[ -z "$mon_pod" ]]; then
+        log "No running monitor pods found. Cannot recover secrets (Cluster might be starting fresh). Skipping recovery."
+        return 0
+    fi
+    
+    log "Found monitor pod '${mon_pod}'. Attempting to extract admin keyring..."
+    
+    # Extract Keyring
+    # We construct a temporary ceph.conf inside the pod to point to itself/peers to avoid "conf not found" errors
+    # Actually, we can just try to cat the keyring file if we know where it is, or use 'ceph auth get'
+    # The safest way is 'ceph auth get client.admin' but it needs connection.
+    # If connection fails (as seen), we might need to read the file directly?
+    # Specifying -n mon. and -k /var/lib/ceph/mon/ceph-*/keyring worked.
+    
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --project="${PROJECT_ID}" --tunnel-through-iap --command "
+        set -o pipefail
+        
+        # 1. Get Pod IP and Mon Name
+        MON_NAME=\$(kubectl -n ${namespace} get pod ${mon_pod} -o jsonpath='{.metadata.labels.ceph_daemon_id}')
+        MON_KEYRING_PATH=\"/var/lib/ceph/mon/ceph-\${MON_NAME}/keyring\"
+        
+        # 2. Extract Key via Ceph Command (Local Auth)
+        # We use a minimal config to avoid network DNS issues during bootstrap
+        echo '[global]' > /tmp/ceph.conf.rec
+        echo 'mon_host = 127.0.0.1' >> /tmp/ceph.conf.rec
+        
+        # Copy config to pod
+        kubectl -n ${namespace} cp /tmp/ceph.conf.rec ${mon_pod}:/tmp/ceph.conf
+        
+        # Execute extraction
+        KEYRING_CONTENT=\$(kubectl -n ${namespace} exec ${mon_pod} -- ceph -c /tmp/ceph.conf -n mon. -k \${MON_KEYRING_PATH} auth get client.admin 2>/dev/null)
+        
+        if [[ -n \"\$KEYRING_CONTENT\" ]]; then
+            echo \"Recovered keyring. Recreating secret...\"
+            kubectl -n ${namespace} create secret generic ${secret_name} \\
+                --from-literal=keyring=\"\$KEYRING_CONTENT\" \\
+                --type=kubernetes.io/rook
+            echo \"Secret '${secret_name}' successfully restored.\"
+        else
+            echo \"Failed to extract keyring from ${mon_pod}.\"
+            exit 1
+        fi
+    "
+}
+
 deploy_rook_cluster() {
     # 3. Deploy Rook Cluster
     log "Preparing Rook Cluster Configuration..."
@@ -312,7 +375,7 @@ def generate_values():
             }
         },
         'configOverride': None,
-        'cephFileSystems': [{'name': 'ceph-filesystem', 'spec': fs_spec, 'storageClass': {'enabled': True, 'isDefault': True, 'name': 'ceph-filesystem', 'pool': 'ceph-filesystem-data0', 'reclaimPolicy': 'Delete', 'allowVolumeExpansion': True}}],
+        'cephFileSystems': [{'name': 'ceph-filesystem', 'spec': fs_spec, 'storageClass': {'enabled': True, 'isDefault': True, 'name': 'ceph-filesystem', 'pool': 'data0', 'reclaimPolicy': 'Delete', 'allowVolumeExpansion': True, 'parameters': {'clusterID': 'rook-ceph', 'csi.storage.k8s.io/provisioner-secret-name': 'rook-csi-cephfs-provisioner', 'csi.storage.k8s.io/provisioner-secret-namespace': 'rook-ceph', 'csi.storage.k8s.io/controller-expand-secret-name': 'rook-csi-cephfs-provisioner', 'csi.storage.k8s.io/controller-expand-secret-namespace': 'rook-ceph', 'csi.storage.k8s.io/node-stage-secret-name': 'rook-csi-cephfs-node', 'csi.storage.k8s.io/node-stage-secret-namespace': 'rook-ceph', 'csi.storage.k8s.io/fstype': 'ext4'}}}],
         'cephBlockPools': [{
             'name': 'ceph-blockpool',
             'spec': {
@@ -327,7 +390,15 @@ def generate_values():
                 'allowVolumeExpansion': True,
                 'parameters': {
                     'imageFormat': '2',
-                    'imageFeatures': 'layering' # simplified features for broad kernel support
+                    'imageFeatures': 'layering', # simplified features for broad kernel support
+                    'clusterID': 'rook-ceph',
+                    'csi.storage.k8s.io/provisioner-secret-name': 'rook-csi-rbd-provisioner',
+                    'csi.storage.k8s.io/provisioner-secret-namespace': 'rook-ceph',
+                    'csi.storage.k8s.io/controller-expand-secret-name': 'rook-csi-rbd-provisioner',
+                    'csi.storage.k8s.io/controller-expand-secret-namespace': 'rook-ceph',
+                    'csi.storage.k8s.io/node-stage-secret-name': 'rook-csi-rbd-node',
+                    'csi.storage.k8s.io/node-stage-secret-namespace': 'rook-ceph',
+                    'csi.storage.k8s.io/fstype': 'ext4'
                 }
             }
         }],
@@ -390,6 +461,9 @@ EOF
     
     log "Rook Ceph Cluster deployment initiated."
     rm -f "${OUTPUT_DIR}/gen_rook_values.py"
+
+    # Ensure secrets exist (recover if necessary) before client install
+    ensure_rook_secrets
 
     # 4. Install Ceph Client on Bastion (if enabled)
     if [[ "${ROOK_ENABLE}" == "true" ]]; then

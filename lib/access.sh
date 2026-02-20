@@ -6,11 +6,20 @@ verify_access() {
     set_names
     check_dependencies
     
-    if [ -z "${1:-}" ]; then
+    local EMAIL="${1:-}"
+    
+    # Auto-detect email if not provided
+    if [ -z "$EMAIL" ]; then
+        if command -v gcloud &>/dev/null; then
+            EMAIL=$(gcloud config get-value core/account 2>/dev/null)
+        fi
+    fi
+
+    if [ -z "$EMAIL" ]; then
         error "Usage: ./talos-gcp verify-access <email>"
+        error "Could not detect active gcloud account."
         exit 1
     fi
-    local EMAIL="$1"
     local USER_PROJECT="${PROJECT_ID}"
     
     log "Verifying access for user: ${EMAIL}"
@@ -170,7 +179,7 @@ access_info() {
     
     echo ""
     echo "================================================================================"
-    echo "                   Developer Access Instructions"
+    echo "                   Cluster Access Instructions"
     echo "================================================================================"
     echo ""
     echo "Cluster: ${CLUSTER_NAME}"
@@ -180,8 +189,8 @@ access_info() {
     echo ""
     echo "To access the PRIVATE Talos/K8s API, you must open a secure tunnel via the Bastion."
     echo ""
-    echo "PREREQUISITE: Ensure you have fetched credentials:"
-    echo "    ./talos-gcp get-credentials"
+    echo "If you don't have local credentials yet, fetch them first:"
+    echo "    ./talos-gcp get-credentials -c clusters/${CLUSTER_NAME}.env"
     echo ""
     echo "--------------------------------------------------------------------------------"
     echo "STEP 1: Open the Tunnel"
@@ -216,12 +225,19 @@ access_info() {
 cmd_grant_admin() {
     set_names
     check_dependencies || return 1
-    if [ -z "${1:-}" ]; then
+    local EMAIL="${1:-}"
+    
+    if [ -z "$EMAIL" ]; then
+        if command -v gcloud &>/dev/null; then
+            EMAIL=$(gcloud config get-value core/account 2>/dev/null)
+        fi
+    fi
+
+    if [ -z "$EMAIL" ]; then
         error "Usage: ./talos-gcp grant-admin <email>"
         error "Example: ./talos-gcp grant-admin user@example.com"
         exit 1
     fi
-    local EMAIL="$1"
     log "Granting Admin Access to '${EMAIL}'..."
 
     # Check if SA exists
@@ -279,12 +295,19 @@ cmd_grant_access() {
     set_names
     check_dependencies || return 1
     
-    if [ -z "${1:-}" ]; then
+    local EMAIL="${1:-}"
+    
+    if [ -z "$EMAIL" ]; then
+        if command -v gcloud &>/dev/null; then
+            EMAIL=$(gcloud config get-value core/account 2>/dev/null)
+        fi
+    fi
+
+    if [ -z "$EMAIL" ]; then
         error "Usage: ./talos-gcp grant-access <email>"
         error "Example: ./talos-gcp grant-access dev@example.com"
         exit 1
     fi
-    local EMAIL="$1"
     log "Granting Developer Access to '${EMAIL}'..."
 
     # Check if SA exists
@@ -371,12 +394,19 @@ cmd_revoke_access() {
     set_names
     check_dependencies || return 1
     
-    if [ -z "${1:-}" ]; then
+    local EMAIL="${1:-}"
+    
+    if [ -z "$EMAIL" ]; then
+        if command -v gcloud &>/dev/null; then
+            EMAIL=$(gcloud config get-value core/account 2>/dev/null)
+        fi
+    fi
+
+    if [ -z "$EMAIL" ]; then
         error "Usage: ./talos-gcp revoke-access <email>"
         error "Example: ./talos-gcp revoke-access dev@example.com"
         exit 1
     fi
-    local EMAIL="$1"
     log "Revoking access for '${EMAIL}'..."
     
     # Check if user is an Admin first

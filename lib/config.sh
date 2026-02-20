@@ -4,17 +4,20 @@
 CLUSTER_NAME="${CLUSTER_NAME:-talos-gcp-cluster}"
 REGION="${REGION:-us-central1}"
 ZONE="${ZONE:-${REGION}-b}"
-ARCH="${ARCH:-amd64}"
+
+# Global Variables
+# ARCH: Use env var if set, otherwise detect
+if [ -z "${ARCH:-}" ]; then
+    ARCH=$(uname -m)
+    if [[ "$ARCH" == "x86_64" ]]; then ARCH="amd64"; fi
+    if [[ "$ARCH" == "aarch64" ]]; then ARCH="arm64"; fi
+fi
+export ARCH
 
 # Versions
-TALOS_VERSION="${TALOS_VERSION:-v1.12.3}"
+
+TALOS_VERSION="${TALOS_VERSION:-v1.12.4}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.35.0}"
-# Strict jq checking is in lib/utils.sh - make sure to install jq!
-# Global Variables
-ARCH=$(uname -m)
-if [[ "$ARCH" == "x86_64" ]]; then ARCH="amd64"; fi
-if [[ "$ARCH" == "aarch64" ]]; then ARCH="arm64"; fi
-export ARCH
 
 HELM_VERSION="${HELM_VERSION:-v3.16.2}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.18.6}"
@@ -22,13 +25,17 @@ TRAEFIK_VERSION="${TRAEFIK_VERSION:-38.0.2}"
 
 # Rook Ceph Defaults
 ROOK_ENABLE="${ROOK_ENABLE:-false}"
+ROOK_DEPLOY_MODE="${ROOK_DEPLOY_MODE:-helm}"
 ROOK_CHART_VERSION="${ROOK_CHART_VERSION:-v1.18.9}"
 ROOK_MDS_CPU="${ROOK_MDS_CPU:-3}"           # Default: Production (Recommended)
 ROOK_MDS_MEMORY="${ROOK_MDS_MEMORY:-4Gi}"   # Default: Production (Recommended)
 ROOK_OSD_CPU="${ROOK_OSD_CPU:-1}"           # Default: 1 vCPU per OSD
 ROOK_OSD_MEMORY="${ROOK_OSD_MEMORY:-2Gi}"   # Default: 2Gi per OSD
-# Name of the external Rook Ceph cluster to connect to (if any)
+# Name of the external Rook Ceph cluster to connect to (Legacy single cluster support)
 ROOK_EXTERNAL_CLUSTER_NAME="${ROOK_EXTERNAL_CLUSTER_NAME:-}"
+
+
+
 
 # Mixed Role Versions (Default to global TALOS_VERSION)
 CP_TALOS_VERSION="${CP_TALOS_VERSION:-$TALOS_VERSION}"
@@ -55,6 +62,7 @@ STORAGE_CIDR="${STORAGE_CIDR:-}"
 
 # Health Check Source Ranges (Google Cloud Defaults)
 HC_SOURCE_RANGES="${HC_SOURCE_RANGES:-35.191.0.0/16,130.211.0.0/22}"
+WORKER_HC_PORT="${WORKER_HC_PORT:-80}"
 
 # Compute
 CP_MACHINE_TYPE="${CP_MACHINE_TYPE:-e2-standard-2}"
@@ -143,6 +151,15 @@ set_names() {
     # Ensure BUCKET_NAME is set (defaults to project-id-talos-images if not provided)
     if [ -z "${BUCKET_NAME:-}" ]; then
          BUCKET_NAME="${PROJECT_ID}-talos-images"
+    fi
+
+    # Backwards Compatibility: Populate Array from Legacy Variable if unset
+    if ! declare -p ROOK_EXTERNAL_CLUSTERS &>/dev/null; then
+        if [ -n "${ROOK_EXTERNAL_CLUSTER_NAME:-}" ]; then
+            ROOK_EXTERNAL_CLUSTERS=("${ROOK_EXTERNAL_CLUSTER_NAME}")
+        else
+            ROOK_EXTERNAL_CLUSTERS=()
+        fi
     fi
 
     # Network Resources
@@ -258,7 +275,7 @@ set_names() {
     IG_NAME="${CLUSTER_NAME}-ig"
 
     # Talos Image Name (Global)
-    # Replaces dots with dashes for GCP Image Name compatibility (e.g. v1.12.3 -> talos-v1-12-3-amd64)
+    # Replaces dots with dashes for GCP Image Name compatibility (e.g. v1.12.4 -> talos-v1-12-4-amd64)
     local safe_version="${TALOS_VERSION//./-}"
     TALOS_IMAGE_NAME="talos-${safe_version}-gcp-${ARCH}"
 }

@@ -124,79 +124,100 @@ peer_connect() {
     fi
 
     # Update Firewalls
-    update_peering_firewalls "${remote_cluster}"
+    # NEW: We now configure the firewall on the REMOTE VPC as well (Client-Side Logic)
+    # This allows "clients come and go" without updating the server's config.
+    configure_remote_firewall "${remote_cluster}"
 }
 
-# Updates Firewall Rules for the accepted peer
-# Enforces strictly limited access (Ceph Ports)
-update_peering_firewalls() {
+# Configures Ingress Firewall on the Remote Cluster's VPC to allow traffic from THIS cluster
+# Arguments:
+#   $1: remote_cluster_name
+configure_remote_firewall() {
     local remote_cluster="$1"
     local local_vpc="${CLUSTER_NAME}-vpc"
-    # We need to know the Remote Cluster's CIDRs to allow ingress.
-    # Since we don't have access to remote environment variables here easily without complex lookup,
-    # we might need to describe the remote subnets.
+    local remote_vpc="${remote_cluster}-vpc"
     
-    # Fetch Remote Subnets (Node CIDR)
-    local remote_subnet_name="${remote_cluster}-subnet"
-    local remote_cidr
-    # Attempt to find the subnet in ANY region (Region-Agnostic)
-    # We filter by name AND network to ensuring we get the right one
-    remote_cidr=$(gcloud compute networks subnets list --network="${remote_cluster}-vpc" --filter="name=${remote_subnet_name}" --format="value(ipCidrRange)" --project="${PROJECT_ID}" | head -n1)
+    # We need to allow traffic FROM our local subnets TO the remote VPC.
+    # The rule must be created in the REMOTE project (assuming same project for now).
     
-    # If standard lookup fails (maybe different region?), try alias IP (Pod CIDR) lookup logic if possible.
-    # For native routing, we MUST include the secondary ranges (Pod CIDRs) in the allowed source ranges.
+    local fw_rule_name="allow-${remote_cluster}-from-${CLUSTER_NAME}-custom"
     
-    local remote_secondary_cidrs
-    remote_secondary_cidrs=$(gcloud compute networks subnets list --network="${remote_cluster}-vpc" --filter="name=${remote_subnet_name}" --format="json(secondaryIpRanges)" --project="${PROJECT_ID}" | jq -r '.[].secondaryIpRanges[].ipCidrRange' 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-
-    if [ -n "$remote_secondary_cidrs" ]; then
-        log "  - Found secondary ranges for ${remote_cluster}: ${remote_secondary_cidrs}"
-        if [ -n "$remote_cidr" ]; then
-            remote_cidr="${remote_cidr},${remote_secondary_cidrs}"
-        else
-             remote_cidr="${remote_secondary_cidrs}"
+    # Determine Local CIDRs to allow
+    # We should include SUBNET_RANGE and POD_CIDR
+    local source_ranges="${SUBNET_RANGE}"
+    if [ -n "${POD_CIDR}" ]; then
+        source_ranges="${source_ranges},${POD_CIDR}"
+    fi
+    
+    # Determine Ports
+    # 1. Lookup PEER_${NAME}_PORTS
+    local safe_name="${remote_cluster//-/_}"
+    local port_var="PEER_${safe_name^^}_PORTS"
+    # Indirect expansion safely
+    local custom_ports="${!port_var:-}"
+    # Sanitize: Remove spaces immediately
+    custom_ports="${custom_ports// /}"
+    
+    local rules="icmp" # Safe default
+    local desc="Allow ICMP from client cluster ${CLUSTER_NAME}"
+    
+    if [ -n "$custom_ports" ]; then
+        log "  - Found custom ports for ${remote_cluster}: ${custom_ports}"
+        
+        rules="${custom_ports}"
+        # Ensure ICMP is included for diagnostics if not explicitly added
+        if [[ ",${rules}," != *",icmp,"* ]]; then
+             rules="${rules},icmp"
         fi
+        desc="Allow custom traffic (${custom_ports}) from client cluster ${CLUSTER_NAME}"
+    elif [[ " ${ROOK_EXTERNAL_CLUSTERS[*]:-} " =~ " ${remote_cluster} " ]]; then
+        log "  - Auto-configuring Ceph ports for peer ${remote_cluster}..."
+        rules="tcp:6789,tcp:3300,tcp:6800-7300,icmp"
+        desc="Allow Ceph traffic from client cluster ${CLUSTER_NAME}"
+    else
+        log "  - No custom ports defined for ${remote_cluster}. Defaulting to ICMP only."
     fi
     
-    if [ -z "$remote_cidr" ]; then
-        error "Could not determine CIDR for remote cluster '${remote_cluster}'. Is it deployed?"
-        return 1
-    fi
+    log "  - Configuring Remote Firewall on '${remote_vpc}'..."
+    log "    > Rule: '${fw_rule_name}'"
+    log "    > Allow From: ${source_ranges}"
+    log "    > Rules: ${rules}"
     
-    log "  - Updating Firewalls for remote CIDR: ${remote_cidr}..."
-
-    # Rule 1: Allow Ceph Ports (Mon: 6789, 3300, OSD: 6800-7300) from Remote
-    # Direction: INGRESS
-    # Target: All instances (or ideally just OSDs/Mons if we had tags, but 'allow' is safe to VPC boundaries)
-    local fw_ceph_name="allow-${CLUSTER_NAME}-from-${remote_cluster}-ceph"
-    
-    if ! gcloud compute firewall-rules describe "${fw_ceph_name}" --project="${PROJECT_ID}" &>/dev/null; then
-        log "    - Creating rule '${fw_ceph_name}' (Ports: 6789,3300,6800-7300)..."
-        run_safe gcloud compute firewall-rules create "${fw_ceph_name}" \
-            --network="${local_vpc}" \
+    if ! gcloud compute firewall-rules describe "${fw_rule_name}" --project="${PROJECT_ID}" &>/dev/null; then
+        run_safe gcloud compute firewall-rules create "${fw_rule_name}" \
+            --network="${remote_vpc}" \
             --action=ALLOW \
             --direction=INGRESS \
-            --source-ranges="${remote_cidr}" \
-            --rules="tcp:6789,tcp:3300,tcp:6800-7300" \
-            --target-tags="${CLUSTER_NAME}-worker" \
-            --description="Allow Ceph traffic from peered cluster ${remote_cluster}" \
+            --source-ranges="${source_ranges}" \
+            --rules="${rules}" \
+            --target-tags="${remote_cluster}-worker" \
+            --description="${desc}" \
             --quiet
     else
-        log "    - Rule '${fw_ceph_name}' exists."
-    fi
-    
-    # We should also allow ICMP for diagnostics
-    local fw_icmp_name="allow-${CLUSTER_NAME}-from-${remote_cluster}-icmp"
-    if ! gcloud compute firewall-rules describe "${fw_icmp_name}" --project="${PROJECT_ID}" &>/dev/null; then
-         run_safe gcloud compute firewall-rules create "${fw_icmp_name}" \
-            --network="${local_vpc}" \
-            --action=ALLOW \
-            --direction=INGRESS \
-            --source-ranges="${remote_cidr}" \
-            --rules="icmp" \
+        log "    > Rule already exists. Updating..."
+        run_safe gcloud compute firewall-rules update "${fw_rule_name}" \
+            --source-ranges="${source_ranges}" \
+            --rules="${rules}" \
+            --target-tags="${remote_cluster}-worker" \
+            --description="${desc}" \
             --quiet
     fi
+    
+    # Clean up old legacy rules if they exist (Renaming happened: -ceph and -icmp merged into -custom)
+    local old_ceph="allow-${remote_cluster}-from-${CLUSTER_NAME}-ceph"
+    local old_icmp="allow-${remote_cluster}-from-${CLUSTER_NAME}-icmp"
+    
+    if gcloud compute firewall-rules describe "${old_ceph}" --project="${PROJECT_ID}" &>/dev/null; then
+         log "    > Removing legacy rule '${old_ceph}'..."
+         run_safe gcloud compute firewall-rules delete "${old_ceph}" --project="${PROJECT_ID}" --quiet
+    fi
+    if gcloud compute firewall-rules describe "${old_icmp}" --project="${PROJECT_ID}" &>/dev/null; then
+         log "    > Removing legacy rule '${old_icmp}'..."
+         run_safe gcloud compute firewall-rules delete "${old_icmp}" --project="${PROJECT_ID}" --quiet
+    fi
 }
+
+
 
 # Removes peerings that are NOT in the desired list
 remove_stale_peerings() {
@@ -206,7 +227,7 @@ remove_stale_peerings() {
     
     # Get current peerings
     local current_peerings
-    current_peerings=$(gcloud compute networks peerings list --network="${CLUSTER_NAME}-vpc" --project="${PROJECT_ID}" --format="value(name)" 2>/dev/null | grep "^${prefix}")
+    current_peerings=$(gcloud compute networks peerings list --network="${CLUSTER_NAME}-vpc" --project="${PROJECT_ID}" --format="value(name)" 2>/dev/null | grep "^${prefix}" || true)
     
     for peering in $current_peerings; do
         # Extract remote cluster name from peering name
@@ -222,9 +243,19 @@ remove_stale_peerings() {
             fi
         done
         
+        # If not logically kept by config, check if it's an active client (Dynamic Cleanup)
         if [ "$keep" == "false" ]; then
-            log "Found stale peering '${peering}' (Remote: ${remote}). Removing..."
-            
+            local remote_vpc="${remote}-vpc"
+            # Check if Remote VPC exists
+            if gcloud compute networks describe "${remote_vpc}" --project="${PROJECT_ID}" &>/dev/null; then
+                 log "  - Peering '${peering}' is not in config, but Remote VPC '${remote_vpc}' exists. Preserving as active client."
+                 keep="true"
+            else
+                 log "  - Peering '${peering}' is stale and Remote VPC '${remote_vpc}' is gone. Removing..."
+            fi
+        fi
+        
+        if [ "$keep" == "false" ]; then
             # Delete Local Peering
             run_safe gcloud compute networks peerings delete "${peering}" --network="${CLUSTER_NAME}-vpc" --project="${PROJECT_ID}" --quiet
             
@@ -235,9 +266,46 @@ remove_stale_peerings() {
             
             # Cleanup Firewalls
             log "  - Cleaning up firewalls..."
+            run_safe gcloud compute firewall-rules delete "allow-${CLUSTER_NAME}-from-${remote}-custom" --project="${PROJECT_ID}" --quiet || true
+            # Cleanup legacy rules if they exist
             run_safe gcloud compute firewall-rules delete "allow-${CLUSTER_NAME}-from-${remote}-ceph" --project="${PROJECT_ID}" --quiet || true
             run_safe gcloud compute firewall-rules delete "allow-${CLUSTER_NAME}-from-${remote}-icmp" --project="${PROJECT_ID}" --quiet || true
         fi
     done
+}
+
+list_peers() {
+    log "Configured Peers (PEER_WITH) for '${CLUSTER_NAME}':"
+    local desired_peers=("${PEER_WITH[@]}")
+    if [ ${#desired_peers[@]} -eq 0 ]; then
+        echo "  - None"
+    else
+        for peer in "${desired_peers[@]}"; do
+            echo "  - ${peer}"
+        done
+    fi
+    
+    echo ""
+    log "Active VPC Peerings for '${CLUSTER_NAME}-vpc':"
+    
+    local peerings_json
+    if ! peerings_json=$(gcloud compute networks peerings list --network="${CLUSTER_NAME}-vpc" --project="${PROJECT_ID}" --format="json" 2>/dev/null); then
+        warn "Could not fetch VPC peerings (VPC might not exist yet)."
+        return 0
+    fi
+    
+    if [ "$peerings_json" == "[]" ] || [ -z "$peerings_json" ]; then
+        echo "  - No active peerings found."
+    else
+        echo "$peerings_json" | jq -r '
+        ["PEERING NAME", "REMOTE NETWORK", "STATE", "DETAILS"],
+        (.[] | .peerings[]? | [
+            .name,
+            (.network | split("/") | last),
+            .state,
+            .stateDetails
+        ]) | @tsv' | column -t -s $'\t' | sed 's/^/  /'
+    fi
+    echo ""
 }
 

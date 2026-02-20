@@ -210,6 +210,13 @@ spec:
             path: key.json
 EOF
 
+    if [ ! -f "${OUTPUT_DIR}/gcp-ccm.yaml" ]; then
+        error "File ${OUTPUT_DIR}/gcp-ccm.yaml was NOT created!"
+        exit 1
+    else
+        log "File ${OUTPUT_DIR}/gcp-ccm.yaml created successfully."
+    fi
+
     local GCP_SA_KEY="${OUTPUT_DIR}/service-account.json"
 
     # Ensure GCP SA Key exists
@@ -398,28 +405,45 @@ EOF
         exit 1
     fi
 
-    # Create Setup Script for Bastion
-    cat <<EOF > "${OUTPUT_DIR}/csi-setup.sh"
+cat <<EOF > "${OUTPUT_DIR}/csi-setup.sh"
 #!/bin/bash
 set -e
 
+# Retry function for kubectl commands
+retry_kubectl() {
+    local max_attempts=20
+    local attempt=1
+    local exit_code=0
+    
+    echo "Running: \$@" >&2
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        if "\$@"; then
+            return 0
+        fi
+        exit_code=\$?
+        echo "Command failed (Attempt \$attempt/\$max_attempts). Retrying in 10s..." >&2
+        sleep 10
+    done
+    return \$exit_code
+}
+
 # Fix: Explicitly Create Namespace (Idempotent)
-kubectl --kubeconfig ~/.kube/config create namespace gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
+retry_kubectl kubectl --kubeconfig ~/.kube/config create namespace gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
 
 # Fix: Label for Pod Security Admission (Privileged)
 # Label BEFORE applying manifests to avoid admission warnings/denials
-kubectl --kubeconfig ~/.kube/config label namespace gce-pd-csi-driver pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite
+retry_kubectl kubectl --kubeconfig ~/.kube/config label namespace gce-pd-csi-driver pod-security.kubernetes.io/enforce=privileged pod-security.kubernetes.io/audit=privileged pod-security.kubernetes.io/warn=privileged --overwrite
 
 # Apply Patched Manifests
-kubectl --kubeconfig ~/.kube/config apply -f csi-driver-patched.yaml
+retry_kubectl kubectl --kubeconfig ~/.kube/config apply -f csi-driver-patched.yaml
 
 # Fix: Create Secret for GCP Auth in CORRECT Namespaces
 if [ -f "service-account.json" ]; then
     # 1. For CSI Driver (gce-pd-csi-driver namespace)
-    kubectl --kubeconfig ~/.kube/config create secret generic cloud-sa --from-file=cloud-sa.json=service-account.json -n gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
+    retry_kubectl kubectl --kubeconfig ~/.kube/config create secret generic cloud-sa --from-file=cloud-sa.json=service-account.json -n gce-pd-csi-driver --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
     
     # 2. For CCM (kube-system namespace) - ensuring it has it too just in case
-    kubectl --kubeconfig ~/.kube/config create secret generic gcp-service-account --from-file=key.json=service-account.json -n kube-system --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
+    retry_kubectl kubectl --kubeconfig ~/.kube/config create secret generic gcp-service-account --from-file=key.json=service-account.json -n kube-system --dry-run=client -o yaml | kubectl --kubeconfig ~/.kube/config apply -f -
 else
     echo "Warning: service-account.json not found, skipping secret creation."
 fi
@@ -434,12 +458,12 @@ EOF
     chmod +x "${OUTPUT_DIR}/csi-setup.sh"
     
     log "Pushing CSI artifacts to Bastion..."
-    run_safe gcloud compute scp "${OUTPUT_DIR}/csi-driver-patched.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
-    run_safe gcloud compute scp "${OUTPUT_DIR}/csi-setup.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
-    run_safe gcloud compute scp "${OUTPUT_DIR}/service-account.json" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+    run_safe gcloud compute scp "${OUTPUT_DIR}/csi-driver-patched.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap || return 1
+    run_safe gcloud compute scp "${OUTPUT_DIR}/csi-setup.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap || return 1
+    run_safe gcloud compute scp "${OUTPUT_DIR}/service-account.json" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap || return 1
     
     log "Executing CSI setup on Bastion..."
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./csi-setup.sh && rm csi-setup.sh csi-driver-patched.yaml service-account.json"
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./csi-setup.sh && rm csi-setup.sh csi-driver-patched.yaml service-account.json" || return 1
     rm -f "${OUTPUT_DIR}/csi-driver.sh" "${OUTPUT_DIR}/csi-driver-original.yaml" "${OUTPUT_DIR}/csi-driver-patched.yaml" "${OUTPUT_DIR}/patch_csi.py" "${OUTPUT_DIR}/csi-setup.sh"
     
     # Init StorageClasses
@@ -469,7 +493,7 @@ parameters:
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
 EOF
-    run_safe gcloud compute scp "${OUTPUT_DIR}/storageclass.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
-    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ~/.kube/config apply -f storageclass.yaml && rm storageclass.yaml"
+    run_safe gcloud compute scp "${OUTPUT_DIR}/storageclass.yaml" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap || return 1
+    run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl --kubeconfig ~/.kube/config apply -f storageclass.yaml && rm storageclass.yaml" || return 1
     rm -f "${OUTPUT_DIR}/storageclass.yaml"
 }

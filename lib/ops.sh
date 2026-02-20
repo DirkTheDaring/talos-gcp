@@ -11,6 +11,7 @@ update_ports() {
 }
 
 update_labels() {
+    set_names
     log "Updating instance labels based on runtime versions..."
     
     # Prereq: Bastion must be up
@@ -41,7 +42,7 @@ update_labels() {
     # 2. Talos Version
     local TALOS_VER_ACTUAL
     TALOS_VER_ACTUAL=$(ssh_command kubectl get nodes -l node-role.kubernetes.io/control-plane -o jsonpath='{.items[0].status.nodeInfo.osImage}')
-    # Clean up: "Talos (v1.12.3)" -> "v1.12.3"
+    # Clean up: "Talos (v1.12.4)" -> "v1.12.4"
     TALOS_VER_ACTUAL=$(echo "$TALOS_VER_ACTUAL" | awk -F'[()]' '{print $2}')
     
     if [ -z "$TALOS_VER_ACTUAL" ]; then
@@ -105,4 +106,64 @@ update_labels() {
     done
     
     log "Labels updated successfully."
+}
+
+stop_nodes() {
+    set_names
+    local TARGET_CLUSTER="${1:-$CLUSTER_NAME}"
+    local ZONE_FILTER="AND zone:(${ZONE})"
+    
+    if [ -n "${1:-}" ]; then
+        log "Stopping cluster '${TARGET_CLUSTER}' (searching all zones)..."
+        ZONE_FILTER=""
+    else
+        log "Stopping cluster '${TARGET_CLUSTER}' in zone ${ZONE}..."
+    fi
+
+    # check_dependencies - Not needed
+    local INSTANCES
+    INSTANCES=$(gcloud compute instances list --filter="labels.cluster=${TARGET_CLUSTER} AND status:RUNNING ${ZONE_FILTER}" --format="value(name,zone)" --project="${PROJECT_ID}")
+    
+    if [ -n "$INSTANCES" ]; then
+        # We need to handle multiple zones if found
+        while read -r instance_name instance_zone; do
+            if [ -z "$instance_name" ]; then continue; fi
+            log "Stopping ${instance_name} in ${instance_zone}..."
+            run_safe gcloud compute instances stop "${instance_name}" --zone "${instance_zone}" --project="${PROJECT_ID}" &
+        done <<< "$INSTANCES"
+        wait
+        log "Nodes stopped."
+    else
+        log "No running nodes found for '${TARGET_CLUSTER}'."
+    fi
+}
+
+start_nodes() {
+    set_names
+    local TARGET_CLUSTER="${1:-$CLUSTER_NAME}"
+    local ZONE_FILTER="AND zone:(${ZONE})"
+    
+    if [ -n "${1:-}" ]; then
+        log "Starting cluster '${TARGET_CLUSTER}' (searching all zones)..."
+        ZONE_FILTER=""
+    else
+        log "Starting cluster '${TARGET_CLUSTER}' in zone ${ZONE}..."
+    fi
+
+    # check_dependencies - Not needed
+    local INSTANCES
+    INSTANCES=$(gcloud compute instances list --filter="labels.cluster=${TARGET_CLUSTER} AND (status:TERMINATED OR status:STOPPED) ${ZONE_FILTER}" --format="value(name,zone)" --project="${PROJECT_ID}")
+    
+    if [ -n "$INSTANCES" ]; then
+        # We need to handle multiple zones if found
+        while read -r instance_name instance_zone; do
+            if [ -z "$instance_name" ]; then continue; fi
+            log "Starting ${instance_name} in ${instance_zone}..."
+            run_safe gcloud compute instances start "${instance_name}" --zone "${instance_zone}" --project="${PROJECT_ID}" &
+        done <<< "$INSTANCES"
+        wait
+        log "Nodes started."
+    else
+        log "No stopped nodes found for '${TARGET_CLUSTER}'."
+    fi
 }

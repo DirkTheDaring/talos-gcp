@@ -6,7 +6,7 @@
 # --- Phase 5: Register/Bootstrap (Split) ---
 
 # 5a. Bootstrap Etcd & Kubeconfig
-bootstrap_etcd() {
+bootstrap_cluster() {
     log "Phase 7: Bootstrapping Etcd..."
     
     # Ensure variables are set
@@ -102,15 +102,20 @@ EOF
     chmod +x "${OUTPUT_DIR}/bootstrap_cluster.sh"
 
     log "Pushing configs to Bastion..."
-    # Only copy the bootstrap script. configs are handled by phase4.
-    run_safe retry gcloud compute scp "${OUTPUT_DIR}/bootstrap_cluster.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+    # Ensure config dir exists
+    run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "mkdir -p ~/.talos" || return 1
+    
+    # Push talosconfig (Required for bootstrap to talk to local node)
+    run_safe retry gcloud compute scp "${OUTPUT_DIR}/talosconfig" "${BASTION_NAME}:~/.talos/config" --zone "${ZONE}" --tunnel-through-iap || return 1
+    
+    run_safe retry gcloud compute scp "${OUTPUT_DIR}/bootstrap_cluster.sh" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap || return 1
     
     log "Executing bootstrap on Bastion..."
-    run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./bootstrap_cluster.sh && rm bootstrap_cluster.sh"
+    run_safe retry gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "./bootstrap_cluster.sh && rm bootstrap_cluster.sh" || return 1
     
     log "Retrieving kubeconfig..."
     # Retrieve from structured path
-    run_safe gcloud compute scp "${BASTION_NAME}:~/.kube/config" "${OUTPUT_DIR}/kubeconfig" --zone "${ZONE}" --tunnel-through-iap
+    run_safe gcloud compute scp "${BASTION_NAME}:~/.kube/config" "${OUTPUT_DIR}/kubeconfig" --zone "${ZONE}" --tunnel-through-iap || return 1
     
     # Secure the kubeconfig
     chmod 600 "${OUTPUT_DIR}/kubeconfig" "${OUTPUT_DIR}/talosconfig"
@@ -178,5 +183,5 @@ finalize_bastion_config() {
         # 3. Secure permissions (600 = Owner only)
         sudo chmod -R 755 /etc/skel/.kube /etc/skel/.talos
         sudo chmod 600 /etc/skel/.kube/config /etc/skel/.talos/config ~/.talos/config ~/.kube/config
-    "
+    " || return 1
 }
