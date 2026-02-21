@@ -119,27 +119,36 @@ list_orphans() {
 
     # D. Forwarding Rules (Heuristic: No Backends)
     log "Scanning for Orphaned Forwarding Rules..."
-    # This is harder to do purely with filters. We'll list rules and check targets.
-    # For now, let's stick to the high-value ones from the previous script: those pointing to non-existent or empty pools?
-    # Simplified: List rules, user must judge cost. 
-    # But to be safe, let's filter for valid orphans from our manual check: 
-    # Logic: If target is a TargetPool, check if pool has instances.
+    local existing_instance_urls
+    existing_instance_urls=$(gcloud compute instances list --project="${PROJECT_ID}" --format="value(selfLink)" 2>/dev/null)
+    
     local fwd_rules
     if fwd_rules=$(gcloud compute forwarding-rules list --project="${PROJECT_ID}" --format="json(name,region,IPAddress,target)" 2>/dev/null); then
          while read -r name region ip target; do
              if [ -n "$name" ]; then
-                 # Heuristic: If target contains "targetPools", check that pool
                  if [[ "$target" == *"targetPools"* ]]; then
                      local pool_name=$(basename "$target")
                      local region_name=$(basename "$region")
-                     # Check pool health/instances
                      local pool_json
                      pool_json=$(gcloud compute target-pools describe "$pool_name" --region="$region_name" --project="${PROJECT_ID}" --format="json" 2>/dev/null || echo "{}")
                      local instances
-                     instances=$(echo "$pool_json" | jq -r '.instances')
+                     instances=$(echo "$pool_json" | jq -c '.instances // []')
                      
-                     if [ "$instances" == "null" ] || [ -z "$instances" ]; then
-                          add_orphan "FWD_RULE" "$name" "$region_name" "IP: $ip, Target: $pool_name (Empty/Missing)" "LoadBalancer" "$name"
+                     if [ "$instances" == "[]" ]; then
+                          add_orphan "FWD_RULE" "$name" "$region_name" "IP: $ip, Target: $pool_name (Empty)" "LoadBalancer" "$name|$pool_name"
+                     else
+                          local has_active="false"
+                          # Check if any instance URL in the pool exists in GCP
+                          while read -r inst; do
+                              if echo "$existing_instance_urls" | grep -Fq "$inst"; then
+                                  has_active="true"
+                                  break
+                              fi
+                          done < <(echo "$instances" | jq -r '.[]')
+                          
+                          if [ "$has_active" == "false" ]; then
+                              add_orphan "FWD_RULE" "$name" "$region_name" "IP: $ip, Target: $pool_name (Dead VMs)" "LoadBalancer" "$name|$pool_name"
+                          fi
                      fi
                  fi
              fi
@@ -418,10 +427,23 @@ cleanup_orphans() {
                          fi
                          ;;
                      "FWD_RULE")
-                         # Also try to clean up the target pool if it's empty?
-                         # For safety, just delete the rule first. User can re-run to see if target pool becomes orphan (not implemented yet, but safe step).
-                         if run_safe gcloud compute forwarding-rules delete "$name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
-                             log "Deleted."
+                         local fw_name="${name}"
+                         local pool_name=""
+                         if [[ "$raw_id" == *"|"* ]]; then
+                             fw_name="${raw_id%|*}"
+                             pool_name="${raw_id#*|}"
+                         fi
+                         
+                         if run_safe gcloud compute forwarding-rules delete "$fw_name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
+                             log "Deleted Forwarding Rule."
+                             if [ -n "$pool_name" ]; then
+                                 log "Deleting associated Target Pool '${pool_name}'..."
+                                 if run_safe gcloud compute target-pools delete "$pool_name" --region="$zone" --project="${PROJECT_ID}" --quiet; then
+                                     log "Deleted Target Pool."
+                                 else
+                                     warn "Failed to delete Target Pool."
+                                 fi
+                             fi
                          else
                              error "Failed to delete forwarding rule."
                          fi
