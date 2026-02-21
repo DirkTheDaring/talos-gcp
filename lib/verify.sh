@@ -164,6 +164,183 @@ EOF
     fi
 }
 
+verify_storage_perf() {
+    log "Verifying Storage Performance (IOPS & Throughput)..."
+    
+    # 1. Select StorageClasses
+    local storage_classes=("standard-rwo" "rook-ceph-ceph-block" "rook-ceph-ceph-filesystem")
+    
+    # Prereq: Check Bastion
+    if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get sc" &>/dev/null; then
+        error "Failed to list StorageClasses. Is the cluster reachable?"
+        return 1
+    fi
+    
+    local test_size="5Gi"
+    local pod_name="storage-perf-test"
+    local pvc_name="perf-pvc"
+    local yaml_file="${OUTPUT_DIR}/storage-perf.yaml"
+
+    echo ""
+    echo "============================================================"
+    echo "   STORAGE PERFORMANCE BENCHMARK"
+    echo "   Cluster: ${CLUSTER_NAME}"
+    echo "============================================================"
+    
+    declare -a PERF_REPORT
+    
+    for sc in "${storage_classes[@]}"; do
+        # Check if SC exists
+        if ! gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get sc ${sc}" &>/dev/null; then
+            log "StorageClass '${sc}' not found on cluster. Skipping."
+            continue
+        fi
+
+        echo ""
+        log "▶ Benchmarking StorageClass: ${sc}"
+        log "  Creating PVC (${test_size}) and Test Pod..."
+        
+        cat <<EOF > "${yaml_file}"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${pvc_name}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: ${sc}
+  resources:
+    requests:
+      storage: ${test_size}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod_name}
+spec:
+  containers:
+  - name: test-container
+    image: alpine:latest
+    command: ["/bin/sh", "-c", "sleep 3600"]
+    volumeMounts:
+    - mountPath: "/data"
+      name: test-volume
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: ${pvc_name}
+  restartPolicy: Never
+EOF
+
+        run_safe gcloud compute scp "${yaml_file}" "${BASTION_NAME}:~" --zone "${ZONE}" --tunnel-through-iap
+        run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl apply -f storage-perf.yaml"
+
+        # Wait for Pod
+        log "  Waiting for Test Pod to be Ready..."
+        local pod_ready=false
+        for i in {1..30}; do
+            local status=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl get pod ${pod_name} -o jsonpath='{.status.phase}'" 2>/dev/null)
+            if [ "$status" == "Running" ]; then
+                pod_ready=true
+                break
+            fi
+            echo -n "."
+            sleep 5
+        done
+        echo ""
+
+        if [ "$pod_ready" != "true" ]; then
+            error "  Pod failed to start. Skipping benchmark for ${sc}."
+            gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl describe pod ${pod_name}"
+            # Cleanup
+            gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl delete -f storage-perf.yaml --grace-period=0 --force" &>/dev/null
+            rm -f "${yaml_file}"
+            continue
+        fi
+
+        log "  Installing fio in test pod..."
+        run_safe gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec ${pod_name} -- apk update >/dev/null 2>&1 && kubectl exec ${pod_name} -- apk add fio coreutils >/dev/null 2>&1"
+
+        # --- 1. Sequential Write (dd) ---
+        log "  [1/4] Running Sequential Write (1GB dd)..."
+        local dd_write_out=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec ${pod_name} -- dd if=/dev/zero of=/data/test.img bs=1M count=1024 oflag=direct 2>&1")
+        local write_speed=$(echo "$dd_write_out" | tail -n 1 | awk -F', ' '{print $NF}')
+        echo "      > Write Throughput: ${write_speed:-Failed}"
+
+        # --- 2. Sequential Read (dd) ---
+        # Clear cache first if possible, though it's hard inside a container without privs. 
+        # Using iflag=direct bypasses cache.
+        log "  [2/4] Running Sequential Read (1GB dd)..."
+        local dd_read_out=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec ${pod_name} -- dd if=/data/test.img of=/dev/null bs=1M count=1024 iflag=direct 2>&1")
+        # Busybox dd output format: "1073741824 bytes (1024.0MB) copied, 1.134375 seconds, 902.7MB/s"
+        # Since it uses a comma separator, we can extract the last field. For GNU dd it might be different, but busybox awk handles both reasonably with regex or just getting the last word.
+        local read_speed=$(echo "$dd_read_out" | tail -n 1 | awk -F', ' '{print $NF}')
+        echo "      > Read Throughput:  ${read_speed:-Failed}"
+
+        # Clean up dd file
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec ${pod_name} -- rm -f /data/test.img"
+
+        # --- 3. Random Read IOPS (fio) ---
+        log "  [3/4] Running Random Read (fio, 4k, 30s)..."
+        local fio_read_cmd="fio --name=randread --ioengine=libaio --direct=1 --rw=randread --bs=4k --iodepth=64 --numjobs=1 --size=1G --runtime=30 --time_based --directory=/data --output-format=json"
+        local fio_read_json=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec ${pod_name} -- ${fio_read_cmd}" 2>/dev/null)
+        
+        local read_iops=$(echo "$fio_read_json" | jq -r '.jobs[0].read.iops' | cut -d'.' -f1)
+        local read_lat=$(echo "$fio_read_json" | jq -r '.jobs[0].read.lat_ns.mean' 2>/dev/null)
+        if [ -n "$read_lat" ] && [ "$read_lat" != "null" ]; then
+             read_lat=$(echo "$read_lat / 1000000" | bc -l | awk '{printf "%.2f ms", $1}')
+        else
+             read_lat="N/A"
+        fi
+        echo "      > Random Read IOPS: ${read_iops:-Failed} (Avg Latency: ${read_lat})"
+
+        # Clean up read file
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec ${pod_name} -- rm -f /data/randread.0.0"
+
+        # --- 4. Random Write IOPS (fio) ---
+        log "  [4/4] Running Random Write (fio, 4k, 30s)..."
+        local fio_write_cmd="fio --name=randwrite --ioengine=libaio --direct=1 --rw=randwrite --bs=4k --iodepth=64 --numjobs=1 --size=1G --runtime=30 --time_based --directory=/data --output-format=json"
+        local fio_write_json=$(gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl exec ${pod_name} -- ${fio_write_cmd}" 2>/dev/null)
+        
+        local write_iops=$(echo "$fio_write_json" | jq -r '.jobs[0].write.iops' | cut -d'.' -f1)
+        local write_lat=$(echo "$fio_write_json" | jq -r '.jobs[0].write.lat_ns.mean' 2>/dev/null)
+        if [ -n "$write_lat" ] && [ "$write_lat" != "null" ]; then
+             write_lat=$(echo "$write_lat / 1000000" | bc -l | awk '{printf "%.2f ms", $1}')
+        else
+             write_lat="N/A"
+        fi
+        echo "      > Random Write IOPS: ${write_iops:-Failed} (Avg Latency: ${write_lat})"
+        
+        # Cleanup
+        log "  Cleaning up resources for ${sc}..."
+        gcloud compute ssh "${BASTION_NAME}" --zone "${ZONE}" --tunnel-through-iap --command "kubectl delete -f storage-perf.yaml --grace-period=0 --force" &>/dev/null
+        rm -f "${yaml_file}"
+        
+        echo "  --- Summary for ${sc} ---"
+        echo "  Sequential Write: ${write_speed}"
+        echo "  Sequential Read:  ${read_speed}"
+        echo "  Random Read IOPS: ${read_iops}"
+        echo "  Random Write IOPS: ${write_iops}"
+        echo "  --------------------------------"
+        
+        PERF_REPORT+=("${sc}|${write_speed:-Failed}|${read_speed:-Failed}|${read_iops:-Failed} (${read_lat})|${write_iops:-Failed} (${write_lat})")
+    done
+    
+    echo ""
+    echo "=========================================================================================================="
+    echo "                               STORAGE PERFORMANCE SUMMARY REPORT"
+    echo "=========================================================================================================="
+    printf "%-30s | %-16s | %-16s | %-22s | %-22s\n" "StorageClass" "Seq Write" "Seq Read" "Rand Read IOPS" "Rand Write IOPS"
+    echo "----------------------------------------------------------------------------------------------------------"
+    for row in "${PERF_REPORT[@]}"; do
+        IFS='|' read -r sc ws rs ri wi <<< "$row"
+        printf "%-30s | %-16s | %-16s | %-22s | %-22s\n" "$sc" "$ws" "$rs" "$ri" "$wi"
+    done
+    echo "=========================================================================================================="
+    echo ""
+    log "Storage Performance Benchmark Complete."
+}
+
 verify_connectivity() {
     log "Verifying Network Connectivity (Pod-to-Pod & DNS)..."
     

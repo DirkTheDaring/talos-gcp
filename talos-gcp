@@ -302,6 +302,11 @@ case "$COMMAND" in
         check_dependencies
         verify_storage
         ;;
+    verify-storage-perf)
+        set_names "true"
+        check_dependencies
+        verify_storage_perf
+        ;;
     verify-connectivity)
         set_names "true"
         check_dependencies
